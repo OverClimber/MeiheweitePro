@@ -1,0 +1,13 @@
+-- RD 规则层的「原版入口」，在本 core 上**不可用**，故意留成注释文件。
+--
+-- 原版（RD 客户端 KoishiPro/script/special.lua）做三件事：
+--   Duel.LoadScript("RDBase.lua") …（17 个规则库）
+--   RD = RushDuel
+--   function Auxiliary.PreloadUds() RD.Init() end
+--
+-- 前两件事要 Duel.LoadScript、第三件事要 core 在决斗开始时回调 PreloadUds ——
+-- AI.Server.exe 的 core 两样都没有（取证见 devtools/rd_ai/bootstrap.lua 顶部注释）。
+-- 而 special.lua 又是 core 最先加载的脚本，那时连 Duel 都还没有，所以它必然中断。
+--
+-- ⇒ 真正的引导在 utility.lua 末尾（即 devtools/rd_ai/bootstrap.lua 的展开结果），
+--   本文件只留作「这里原本有什么、为什么不用」的说明。

@@ -1,0 +1,225 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &137784
+GameObject:
+  m_ObjectHideFlags: 0
+  m_PrefabParentObject: {fileID: 0}
+  m_PrefabInternal: {fileID: 100100000}
+  serializedVersion: 5
+  m_Component:
+  - component: {fileID: 431276}
+  - component: {fileID: 11419100}
+  m_Layer: 0
+  m_Name: loader
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &431276
+Transform:
+  m_ObjectHideFlags: 1
+  m_PrefabParentObject: {fileID: 0}
+  m_PrefabInternal: {fileID: 100100000}
+  m_GameObject: {fileID: 137784}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_RootOrder: 0
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &11419100
+MonoBehaviour:
+  m_ObjectHideFlags: 1
+  m_PrefabParentObject: {fileID: 0}
+  m_PrefabInternal: {fileID: 100100000}
+  m_GameObject: {fileID: 137784}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 28ef187da6853a748ad55671fa3e2b30, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  main_camera: {fileID: 0}
+  face: {fileID: 0}
+  light: {fileID: 0}
+  audio: {fileID: 0}
+  zhankai: {fileID: 0}
+  mod_ui_2d: {fileID: 115194, guid: 110e0a191727d5f4f8860ae0957652dd, type: 2}
+  mod_ui_3d: {fileID: 195504, guid: c5a2efa85dfe2e241aeb34c422f115e5, type: 2}
+  mod_winExplode: {fileID: 0}
+  mod_loseExplode: {fileID: 0}
+  mod_audio_effect: {fileID: 147400, guid: ef457fec355425b4fbbcaee0c3f8e24e, type: 2}
+  mod_ocgcore_card: {fileID: 100424, guid: b5a84437478652141a934a354b3e3601, type: 2}
+  mod_ocgcore_card_cloude: {fileID: 110566, guid: b25dd4ff3da664943ac6df33917760df,
+    type: 2}
+  mod_ocgcore_card_number_shower: {fileID: 166554, guid: 7bd46bc0bcd905642a0ce222a38c10ef,
+    type: 2}
+  mod_ocgcore_card_figure_line: {fileID: 183720, guid: 3114747afcca84e4d81360d5b19e5cab,
+    type: 2}
+  mod_ocgcore_hidden_button: {fileID: 166824, guid: 01f966aaa639fcb468309549dec9b2e6,
+    type: 2}
+  mod_ocgcore_coin: {fileID: 116782, guid: 46b964b7c9b416348a9b4f55c97a3b5e, type: 2}
+  mod_ocgcore_dice: {fileID: 192632, guid: 8ba8e306049b10a4dabc04533d2b59c3, type: 2}
+  mod_simple_quad: {fileID: 153178, guid: 7e032b6b717b6594ca1d7a2f7c279f0a, type: 2}
+  mod_simple_ngui_background_texture: {fileID: 197510, guid: 4bcf544bc00b6e84daf5bf79d2238069,
+    type: 2}
+  mod_simple_ngui_text: {fileID: 151012, guid: dd963d913f8da854093ea817838d4e6e, type: 2}
+  mod_ocgcore_number: {fileID: 174198, guid: f65670976d5ffc0469cafb02eb365281, type: 2}
+  mod_ocgcore_decoration_chain_selecting: {fileID: 113922, guid: 7f3c7b73f5951bc46b55a925c39e5100,
+    type: 2}
+  mod_ocgcore_decoration_card_selected: {fileID: 125802, guid: ea01e87d0549f9d4a9b683849a1a94ac,
+    type: 2}
+  mod_ocgcore_decoration_card_selecting: {fileID: 121074, guid: 7c6151eed97886444a7fe80b34799937,
+    type: 2}
+  mod_ocgcore_decoration_card_active: {fileID: 100012, guid: 9a7a05fb80cccd94d875499f64d8929f,
+    type: 2}
+  mod_ocgcore_decoration_spsummon: {fileID: 100006, guid: e0ece19172c71f04ea0bfb7e4865dbe9,
+    type: 2}
+  mod_ocgcore_decoration_thunder: {fileID: 185390, guid: ae40f05e43b39ac41bb85107368b3722,
+    type: 2}
+  mod_ocgcore_decoration_trap_activated: {fileID: 170606, guid: 60715b5bd03961046b6505cbf86eabae,
+    type: 2}
+  mod_ocgcore_decoration_magic_activated: {fileID: 135170, guid: e1020196a14a1954b920066c69ccad08,
+    type: 2}
+  mod_ocgcore_decoration_magic_zhuangbei: {fileID: 100018, guid: 2f28e66d12f2ab349b1d9b8ba5062c6e,
+    type: 2}
+  mod_ocgcore_decoration_removed: {fileID: 194634, guid: 576d137ab03133744a60dbc343d3adee,
+    type: 2}
+  mod_ocgcore_decoration_tograve: {fileID: 100000, guid: 897386993fd43bc4cb52b9fc6151b39d,
+    type: 2}
+  mod_ocgcore_decoration_card_setted: {fileID: 100006, guid: ab72d295ef12bc14d9e99b3daa8d84b7,
+    type: 2}
+  mod_ocgcore_blood: {fileID: 154148, guid: a1ab56112f979df4b8a38ce78f30bdee, type: 2}
+  mod_ocgcore_blood_screen: {fileID: 100004, guid: 4826a28e01211e64ab63e8aab65bf799,
+    type: 2}
+  mod_ocgcore_bs_atk_decoration: {fileID: 175090, guid: 2f2cada2fe5e43d41ae45f887daa5080,
+    type: 2}
+  mod_ocgcore_bs_atk_line_earth: {fileID: 151680, guid: cb70567038412554480a054359dad8e2,
+    type: 2}
+  mod_ocgcore_bs_atk_line_water: {fileID: 136688, guid: f0c57bf00f98b844586c7f6a2b479f04,
+    type: 2}
+  mod_ocgcore_bs_atk_line_fire: {fileID: 129408, guid: 9abbee9e8a70372468d1cfc1e389295c,
+    type: 2}
+  mod_ocgcore_bs_atk_line_wind: {fileID: 140622, guid: d5d4d53e7b9c3fd45bca4ad92a4cc74a,
+    type: 2}
+  mod_ocgcore_bs_atk_line_dark: {fileID: 168002, guid: 01cab1d8e05c8ea469dfd4c55d3f6590,
+    type: 2}
+  mod_ocgcore_bs_atk_line_light: {fileID: 179022, guid: 7dba31b90c96b564dbdf9e0971777138,
+    type: 2}
+  mod_ocgcore_cs_chaining: {fileID: 100010, guid: eb8a90c9a22c2544493ff578f226d994,
+    type: 2}
+  mod_ocgcore_cs_end: {fileID: 100012, guid: 9fb41bc61b608b149b5288295fea40aa, type: 2}
+  mod_ocgcore_cs_bomb: {fileID: 100000, guid: 3c0d69c6607bfe744b7da0ab6ff53b67, type: 2}
+  mod_ocgcore_cs_negated: {fileID: 197450, guid: 060605917b7456e48a265ed2f97acede,
+    type: 2}
+  mod_ocgcore_cs_mon_earth: {fileID: 0}
+  mod_ocgcore_cs_mon_water: {fileID: 0}
+  mod_ocgcore_cs_mon_fire: {fileID: 0}
+  mod_ocgcore_cs_mon_wind: {fileID: 0}
+  mod_ocgcore_cs_mon_light: {fileID: 0}
+  mod_ocgcore_cs_mon_dark: {fileID: 0}
+  mod_ocgcore_ss_summon_earth: {fileID: 148964, guid: f32dc027b2d1be6459f901a0b050c942,
+    type: 2}
+  mod_ocgcore_ss_summon_water: {fileID: 100004, guid: c5b9f6599e8c9c9478a02e9985f3b1c3,
+    type: 2}
+  mod_ocgcore_ss_summon_fire: {fileID: 100014, guid: 88c5db92014a0de49bbd528500c200b3,
+    type: 2}
+  mod_ocgcore_ss_summon_wind: {fileID: 189074, guid: ecf3c4980b27d8d42a8b20c84b6cac83,
+    type: 2}
+  mod_ocgcore_ss_summon_dark: {fileID: 187834, guid: 1b813d3d389b63746b48cd105c252810,
+    type: 2}
+  mod_ocgcore_ss_summon_light: {fileID: 100000, guid: cdab8f13fdb5149499cf316800062215,
+    type: 2}
+  mod_ocgcore_ol_earth: {fileID: 0}
+  mod_ocgcore_ol_water: {fileID: 0}
+  mod_ocgcore_ol_fire: {fileID: 0}
+  mod_ocgcore_ol_wind: {fileID: 0}
+  mod_ocgcore_ol_dark: {fileID: 0}
+  mod_ocgcore_ol_light: {fileID: 0}
+  mod_ocgcore_ss_spsummon_normal: {fileID: 125854, guid: ae7e84d855783134f9a09d0ca5cebfed,
+    type: 2}
+  mod_ocgcore_ss_spsummon_ronghe: {fileID: 188150, guid: 1e478768a2b045e4bb691d22be794c09,
+    type: 2}
+  mod_ocgcore_ss_spsummon_tongtiao: {fileID: 153922, guid: 9e9b2e1d27abff74fa680e1645e4ce50,
+    type: 2}
+  mod_ocgcore_ss_spsummon_yishi: {fileID: 100010, guid: f931792496a8f834799e88ea5ded6b80,
+    type: 2}
+  mod_ocgcore_ss_spsummon_link: {fileID: 0}
+  mod_ocgcore_ss_p_idle_effect: {fileID: 113812, guid: 4eee7fd80ee672d4f8cdaa9179879637,
+    type: 2}
+  mod_ocgcore_ss_p_sum_effect: {fileID: 192278, guid: 4a755177320618248bc717e4dc49926b,
+    type: 2}
+  mod_ocgcore_ss_dark_hole: {fileID: 125294, guid: 7293a93c0f10df4469dff5d874100ce8,
+    type: 2}
+  mod_ocgcore_ss_link_mark: {fileID: 0}
+  new_ui_menu: {fileID: 0}
+  new_ui_setting: {fileID: 0}
+  new_ui_book: {fileID: 0}
+  new_ui_selectServer: {fileID: 0}
+  new_ui_gameInfo: {fileID: 0}
+  new_ui_cardDescription: {fileID: 0}
+  new_ui_search: {fileID: 0}
+  new_ui_searchDetailed: {fileID: 0}
+  new_ui_cardOnSearchList: {fileID: 0}
+  new_bar_changeSide: {fileID: 0}
+  new_bar_duel: {fileID: 0}
+  new_bar_room: {fileID: 0}
+  new_bar_editDeck: {fileID: 0}
+  new_bar_watchDuel: {fileID: 0}
+  new_bar_watchRecord: {fileID: 0}
+  new_mod_cardInDeckManager: {fileID: 0}
+  new_mod_tableInDeckManager: {fileID: 0}
+  new_ui_handShower: {fileID: 0}
+  new_ui_textMesh: {fileID: 0}
+  new_ui_superButton: {fileID: 0}
+  new_ui_superButtonTransparent: {fileID: 0}
+  new_ui_aiRoom: {fileID: 0}
+  new_ocgcore_field: {fileID: 0}
+  new_ocgcore_chainCircle: {fileID: 0}
+  new_ocgcore_wait: {fileID: 0}
+  new_mouse: {fileID: 0}
+  remaster_deckManager: {fileID: 0}
+  remaster_replayManager: {fileID: 0}
+  remaster_puzzleManager: {fileID: 0}
+  remaster_tagRoom: {fileID: 0}
+  remaster_room: {fileID: 0}
+  ES_1: {fileID: 0}
+  ES_2: {fileID: 0}
+  ES_2Force: {fileID: 0}
+  ES_3cancle: {fileID: 0}
+  ES_Single_multiple_window: {fileID: 0}
+  ES_Single_option: {fileID: 0}
+  ES_multiple_option: {fileID: 0}
+  ES_input: {fileID: 0}
+  ES_position: {fileID: 0}
+  ES_Tp: {fileID: 0}
+  ES_Face: {fileID: 0}
+  ES_FS: {fileID: 0}
+  Pro1_CardShower: {fileID: 0}
+  Pro1_superCardShower: {fileID: 0}
+  Pro1_superCardShowerA: {fileID: 0}
+  New_arrow: {fileID: 0}
+  New_selectKuang: {fileID: 0}
+  New_chainKuang: {fileID: 0}
+  New_phase: {fileID: 0}
+  New_decker: {fileID: 0}
+  New_winCaculator: {fileID: 0}
+  New_winCaculatorRecord: {fileID: 0}
+  New_ocgcore_placeSelector: {fileID: 0}
+  mouseParticle: {fileID: 0}
+--- !u!1001 &100100000
+Prefab:
+  m_ObjectHideFlags: 1
+  serializedVersion: 2
+  m_Modification:
+    m_TransformParent: {fileID: 0}
+    m_Modifications:
+    - target: {fileID: 0}
+      propertyPath: m_IsActive
+      value: 1
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+  m_ParentPrefab: {fileID: 0}
+  m_RootGameObject: {fileID: 137784}
+  m_IsPrefabParent: 1

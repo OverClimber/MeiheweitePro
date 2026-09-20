@@ -1,0 +1,4 @@
+7-Zip 26.01 (7z.exe / 7z.dll)
+Copyright (C) Igor Pavlov. License: LGPL-2.1 / unRAR restriction.
+Source: https://www.7-zip.org — binaries copied unmodified for the
+YGOPro2 incremental package extraction feature.
