@@ -670,14 +670,41 @@ public class Ocgcore : ServantWithCardDescription
         {
             return null;
         }
+        // ── 该摆哪一列（q）────────────────────────────────────────────────
+        // 优先用它自己的「旧格位」= 极限召唤把它放下的那一列（before.sequence）。
+        // ⛔⛔ 拿不到旧格位时**绝不许**再 return null（2026-09-25 定案，「左部件跑到第三格
+        //   右部件上方、遮挡阶段 UI」的根因）：调用方 `rdMaximumWantPosition` 的兜底是
+        //   `get_point_worldposition(c.p, c)`，而此刻 `c.p.location` 是**素材态**
+        //   （含 Overlay 位；可能是 `0x82 = Overlay|Hand`，或还没被 normalizeRdMaximumPiece
+        //   归一过）—— `get_point_worldposition_rd` 对 `0x82` 这种**没有任何分支命中**的区
+        //   会一路落到函数末尾 `return Vector3.zero`（⚠ 是**垃圾向量、不是 null**，
+        //   调用方的 `??` 兜底永远不会触发）。于是两步连锁：
+        //     · 卡落到世界原点 (0, 0, 0)；
+        //     · 紧接着「三件齐」的 `rdMaximumFlushPosition` 拿这个 nativePos 算方向 ——
+        //       x = 0 落在中列的**右侧** ⇒ dir = −1 ⇒ x_target = 0 + (−1)×(0.27 − 4.35)
+        //       = **+4.08**，正是**第三格（右部件）**的贴紧位置；而 z 还留在 0
+        //       （比怪兽排 zNear 更靠屏幕上方）⇒ 视觉上就是「左部件跑到右部件**上方**」，
+        //       并且因为偏上而**遮挡阶段 UI**。
+        //   ⇒ 没有旧格位时退到**本体所在列**（真·素材本来就叠在父卡那一格上），
+        //     再退到中列 2 —— 落点**永远是中区一个合法格位**。
+        // ⚠ 「没有怪兽区位」与「sequence 越界」在这里**合并成同一条**，理由同上：
+        //   旧实现把两者都写成 return null，也就都掉进了那个垃圾向量。
         GPS before = c.p_beforeOverLayed;
-        if ((before.location & (UInt32)CardLocation.MonsterZone) == 0)
+        uint q = 2;
+        bool qFromBefore = false;
+        if ((before.location & (UInt32)CardLocation.MonsterZone) != 0
+            && before.sequence >= 1 && before.sequence <= 3)
         {
-            return null;      // 效果直接把部件当素材贴上去的情况：没有「旧格位」可用
+            q = before.sequence;
+            qFromBefore = true;
         }
-        if (before.sequence < 1 || before.sequence > 3)
+        else
         {
-            return null;      // RD 中区就三列；越界说明不是极限召唤那套，别硬塞
+            gameCard qf = rdMaximumBody(c);
+            if (qf != null && qf.p.sequence >= 1 && qf.p.sequence <= 3)
+            {
+                q = qf.p.sequence;
+            }
         }
 
         // ⚠⚠ 只借 before 的**格位（sequence）**，controller 必须用本卡自己的 `p.controller`。
@@ -722,16 +749,70 @@ public class Ocgcore : ServantWithCardDescription
             if ((gone.location & (UInt32)(CardLocation.Grave | CardLocation.Deck
                 | CardLocation.Removed | CardLocation.Extra)) == 0)
             {
-                return null;
+                // ⛔ 残余区**不是**有格位分支的区 ⇒ 它是**召唤中间态**（`0x82 = Overlay|Hand`，
+                //   还没被 normalizeRdMaximumPiece 归一），这张卡其实**还在场上** ——
+                //   绝不能 return null（那会掉进调用方的垃圾向量兜底，见上面「该摆哪一列」那段）。
+                //   ⇒ 按 q 列摆。留痕 `piece-fallback`：这条一旦出现，说明 core 又发了
+                //   「Overlay|残余区」的组合而归一没盖住（验收可咬）。
+                rdMaxNotePieceFallback(c, q, qFromBefore, "mid");
+                GPS mid = c.p;
+                mid.location = (UInt32)CardLocation.MonsterZone;
+                mid.sequence = q;
+                mid.position = (int)CardPosition.FaceUpAttack;
+                return get_point_worldposition_rd(mid, null);
             }
             return get_point_worldposition_rd(gone, null);
         }
 
+        // 走到这里 = 还在场上的素材态部件。
+        // ⚠ 只在**真的走了兜底列**（拿不到旧格位）时留痕：正常极限召唤恒 qFromBefore=1，
+        //   无条件调用会变成「每张部件每次 realize 都落一行」的刷屏 —— 2026-09-25 实测一局
+        //   3 条全是 `fromBefore=1` 的正常路径（`before=0/4/1/1`），把「正常局 0 条」这条
+        //   判据从 0 打成 3。反过来这也是一份**正向证据**：修好的实现没动正常路径。
+        if (!qFromBefore)
+        {
+            rdMaxNotePieceFallback(c, q, false, "nobefore");
+        }
         GPS g = c.p;
         g.location = (UInt32)CardLocation.MonsterZone;
-        g.sequence = before.sequence;
+        g.sequence = q;
         g.position = (int)CardPosition.FaceUpAttack;
         return get_point_worldposition_rd(g, null);
+    }
+
+    /// <summary>
+    /// 诊断（只在 `log/qt_debug.on` 下写，内容不变只写一次）：**部件摆位走了兜底列**的留痕。
+    ///
+    /// 为什么要它：`maximumPieceWorldPosition` 现在对「拿不到旧格位」一律退到本体列/中列
+    /// （见那里的长注释），这**修好了**旧实现的「垃圾向量 → 被三件齐的贴紧推到第三格」
+    /// 那条连锁，但那条路径本身就是个**异常**（正常极限召唤的部件 before 恒有怪兽区位、
+    /// sequence 恒为 1/3）。⇒ 留一行物证，让「真机再看到 L 部件跑到右边」时能一眼判定
+    /// 是不是这个问题、以及当时的 p / before 到底是什么。
+    /// 去重口径与 `logRdMaximumPieceState` 同一套：按卡号，内容没变不重复写。
+    /// </summary>
+    private readonly System.Collections.Generic.Dictionary<int, string> maxPieceFallbackLastById =
+        new System.Collections.Generic.Dictionary<int, string>();
+
+    private void rdMaxNotePieceFallback(gameCard c, uint q, bool qFromBefore, string why)
+    {
+        if (!QuickTestTrace.Enabled || !GameModeManager.IsRD || c == null)
+        {
+            return;
+        }
+        int id = c.get_data().Id;
+        string line = "piece-fallback id=" + id + " why=" + why
+            + " q=" + q + " fromBefore=" + (qFromBefore ? "1" : "0")
+            + " p=" + c.p.controller + "/" + c.p.location + "/" + c.p.sequence + "/" + c.p.position
+            + " before=" + c.p_beforeOverLayed.controller + "/" + c.p_beforeOverLayed.location
+            + "/" + c.p_beforeOverLayed.sequence + "/" + c.p_beforeOverLayed.position
+            + " over=" + c.overFatherCount;
+        string last;
+        if (maxPieceFallbackLastById.TryGetValue(id, out last) && last == line)
+        {
+            return;
+        }
+        maxPieceFallbackLastById[id] = line;
+        QuickTestTrace.Log("max", line);
     }
 
     /// <summary>
@@ -785,6 +866,24 @@ public class Ocgcore : ServantWithCardDescription
     ///   ⇒ 判「本体在不在」必须要求**它不是素材**，光看 seq 不够。
     ///   ⚠ 这里**不**要求 `sequence == 2`：本判据的错法必须是「保守」（漏判⇒不归位，
     ///     由别的闸兜；误判⇒把本体还在的部件挪走 = 画面炸掉），所以条件取最窄的那一条。
+    ///
+    /// ⛔⛔ **2026-09-25 晚三：再加一道「成组」校验（用户第 3 条）。**
+    ///   上面那套「同侧 + 带怪兽区位 + 不带 Overlay」**没有任何配对语义** —— 它找的是
+    ///   「**本侧随便哪一个本体**」，不是「**这张部件的**本体」。于是：
+    ///     旧极大怪下去、它的 L/R 部件成了孤儿 → 玩家接着召唤**新**极大怪 →
+    ///     `rdMaximumBody(旧部件)` 立刻找到了**新本体** ⇒ 返回非 null ⇒
+    ///     `rdMaxParkOrphans` 判「本体还在」⇒ **孤儿永不归位**（第 1095 行那一句）。
+    ///     旧部件就永久停在场上，位置跟着新本体的格位走 ⇒ 用户看到的
+    ///     「**旧左部件停在下一个极大怪的格子上、遮盖住它**」。
+    ///   ⇒ 必须校验「这张候选本体**确实拥有**该部件」。
+    ///   ⛔ 用 **`GCS_cardGetOverlayElements` 的口径**（引擎的素材归属：同控制者、
+    ///     同 location、同 sequence）—— 这是客户端里唯一的权威归属依据；
+    ///     **不要**用「卡号相邻」那种猜法（三件卡号确实连号，但那是发行规律、不是引擎契约，
+    ///     异画/特殊卡的别名会把相邻关系打乱）。
+    ///   ⚠ 位置口径**必须**跟着 `maximumPieceWorldPosition` / `normalizeRdMaximumPiece`
+    ///     走：部件被归一之后 `p.sequence` 就是本体那一列（2）。所以这一道校验在
+    ///     「部件已被归一」时**恒成立**（那就是健康的三件），只在「部件挂着召唤中间态、
+    ///     还没被归一」时才真正起作用 —— 正是我们要拦的那一族。
     /// </summary>
     private gameCard rdMaximumBody(gameCard piece)
     {
@@ -811,9 +910,193 @@ public class Ocgcore : ServantWithCardDescription
             {
                 continue;      // ⛔ 素材（L/R 部件）**不是**本体
             }
+            // ── 成组校验：这张本体**确实拥有**这块部件吗（口径同 GCS_cardGetOverlayElements）──
+            // ⛔⛔ 别退回「只要同侧就算」。少了这一道，旧极大怪的孤儿部件会被**新本体**
+            //   认领 ⇒ `rdMaxParkOrphans` 永不归位 ⇒ 孤儿永久停在场上盖住新极大怪
+            //   （用户 2026-09-25 第 3 条）。
+            // ⚠⚠ 但**不能无条件要求配对** —— 有一族**健康**的中间态会被它误杀：
+            //   极限召唤的「L/R 已被收成素材、本体那条 MOVE 还在路上」那一段，部件的
+            //   `p.sequence` 还**没被归一**（实测 `p=0/130/0/0`，seq 0），而本体已在
+            //   seq 2 ⇒ 配对校验**不成立**（真机 `qt_5636.log` 22:06:55.725~.893，
+            //   这段窗口实测 168ms）。若那种态被误判成孤儿并超过宽限期（1.0s），
+            //   健康的部件会被送进墓地 —— 比原 bug 更糟。
+            //   ⇒ 否定配对**只在「本侧已经有完整的另一组三件」时**才生效
+            //     （<see cref="rdMaxSideHasOtherTrio"/>）：那才是「新极大怪已成型、
+            //     这张卡纯属上一组的残留」这个**唯一确定的场景**；其余时刻（含
+            //     「本侧只有一个本体、部件还在路上」）退回旧的宽松口径，不误杀。
+            if (rdMaxSideHasOtherTrio(piece, o) && !rdMaxBodyOwnsPiece(o, piece))
+            {
+                continue;
+            }
             return o;
         }
         return null;
+    }
+
+    /// <summary>
+    /// 这块「极大部件」此刻**还在不在场上** —— 也就是它还算不算三件里的一员。
+    ///
+    /// ⛔⛔ 为什么必须有它（用户 2026-09-25 第 4 次报告，物证 `log/qt_17992.log`
+    ///   18:52:34.685 → 18:52:35.544）：
+    ///   所有「三件齐不齐」的判据原来都写的是 **`(location & Overlay) != 0`** ——
+    ///   只问「它是不是素材」，**没问「它还在不在场上」**。可部件被 `rdMaxParkOrphans`
+    ///   归位之后 `p.location` 是 **`0x90 = 墓地|Overlay`**：Overlay 位**照样在**。
+    ///   ⇒ 一句话连锁出的三个症状（用户截图里的全部内容）：
+    ///     · `rdMaximumTrioState` 仍报「齐」⇒ `rdMaxTrioMe=1` ⇒ **大框不掉**、
+    ///       `gameField.setMaximumBand()` 不收；
+    ///     · `rdMaxResolveTrio` 仍把这两张当部件 ⇒ `RdMaxIntegratedOwnsPosition` 返回 true
+    ///       ⇒ **一体化继续占用它们的屏幕位置**（悬停时把它们画回场上那两格）；
+    ///     · `applyRdMaximumTrioScale` 仍给 1.45 倍 ⇒ 卡还撑在大框口径上。
+    ///   物证里两者**同时**成立：`piece … p=1/144/0/0 … got=(403,0,672)`（画在场上）
+    ///   而 `want=(-1201,0,672)`（真实目标=墓地）⇒ 屏幕上是「部件**从墓地回场上**的补间」，
+    ///   同时它的 info 面板按 `p.location & Grave` 打出 **「墓地」** 两个字
+    ///   （`UIHelper.getGPSstringLocation`）。
+    ///
+    /// ⛔⛔⛔ **判据：带 `Overlay` 位，且“残余区”不是真正的终态离场区**（墓地/卡组/除外/额外）。
+    ///
+    /// 为什么**不能**写成「必须带 MonsterZone 位」（2026-09-25 晚八实锤：那么写就是回归，
+    /// 用户第 5 次报告里「三张各自分散、像根本没进极大状态」就是它）：
+    ///   core 把部件收成素材时 `to.location` 实测是 **`0x82 = Overlay|Hand`**
+    ///   （见 `maximumPieceWorldPosition` 里那条 ⛔⛔，物证 `log/qt_19412.log` 22:32:53.266，
+    ///   探针里就是 `p=0/130/0/0`）—— **它不带怪兽区位**。
+    ///   而 `isRdMaximumPiecePending` **第一条**就是 `(location & Overlay) != 0 ⇒ false`
+    ///   ⇒ `0x82` **也**不是 pending。于是「要求 MonsterZone」的写法把 `0x82` 逼进
+    ///   **两边都不认的真空**：既不算三件、也不算召唤中间态 ⇒ 贴紧/放大/大框全不生效，
+    ///   玩家看到的就是「三张卡各自散着、完全不像极大状态」。
+    ///   ⇒ 而 `0x82` 在语义上**就是「已经当上素材了」**（`maximumPieceWorldPosition` 专门
+    ///     为它写了 `mid` 分支、按本体列摆位），**必须算三件**。
+    ///
+    /// 所以闸门只排除**真正的终态**：`0x90(墓地|素材) / 0x50(卡组|素材) / 0x20(除外|素材) /
+    /// 0x40(额外|素材)` —— 那才是不该再占着场上位置、不该再撑 1.45 倍的那一族。
+    /// ⚠ 与 <see cref="rdMaxPieceGoneOffField"/> 的分工：那个要求「**在**终态离场区」，
+    ///   这个要求「**不在**终态离场区」，两者互补且都带 `Overlay` 位 ⇒ 合起来正好切完
+    ///   所有素材态。中间态 `0x82` 归**这个**（算三件）。
+    /// </summary>
+    private static bool rdMaxPieceOnField(gameCard c)
+    {
+        return c != null
+            && (c.p.location & (UInt32)CardLocation.Overlay) != 0
+            && (c.p.location & (UInt32)(CardLocation.Grave | CardLocation.Deck
+                | CardLocation.Removed | CardLocation.Extra)) == 0;
+    }
+
+    /// <summary>
+    /// 这块极大卡是「**刚刚离场的素材态部件/本体**」—— 带着 `Overlay` 位、却已经不在怪兽区。
+    ///
+    /// 用途只有一个：让这类卡的摆位走 **`rush=true` 瞬移**，而不是 `TweenTo` 的 0.1~0.3s 缓动
+    /// （调用点 `realize` 摆位循环末的 `UA_flush_all_gived_witn_lock`）。
+    ///
+    /// ⛔⛔ 为什么必须单列（用户 2026-09-25 第 5 次报告，物证 `log/qt_20760.log`
+    ///   20:23:33.052 → .234）：
+    ///   本体被送墓（`0x4/2/1 → 0x10/0/5`）之后，core 在**同一帧**把三张卡全指向墓地：
+    ///     `[maxmv] flush id=…001 loc=0x90 seq=0 ctrl=1 rush=0 acc=( 4,0,7) giv=(-12,0,7)`
+    ///     `[maxmv] flush id=…003 loc=0x90 seq=0 ctrl=1 rush=0 acc=(-5,0,7) giv=(-12,0,7)`
+    ///     `[maxmv] flush id=…002 loc=0x10 seq=0 ctrl=1 rush=0 acc=( 0,0,7) giv=(-12,0,7)`
+    ///   `rush=0` ⇒ 三张各走一段 TweenTo。于是这 170ms 里玩家看到的是：
+    ///     · 本体已经没了（`count=0`）、三件状态已解散 ⇒ **贴紧/一体化停止**，
+    ///       L/R 各自停在**自己的原格位**（x=+4 / −5，中间空一格）—— 用户说的「**散开**」；
+    ///     · 随后两张部件才慢吞吞地飞向墓地列（x=−12）—— 用户说的「部件**滞留**在场上的
+    ///       一段动画」；
+    ///     · 而它们的 `p.location` 已经是 `0x90` ⇒ info 面板打出「**墓地**」两个字。
+    ///   ⇒ 同一个 `rush` 开关上还挂着一条**同族**的老账（见 `realize` 里
+    ///     `isRdMaximumPiecePending` 那段注释：召唤中「手卡→场」的补间会横穿半张屏幕）。
+    ///     一次把两类都瞬移掉，观感才干净：**召唤时瞬间出现、离场时瞬间消失**。
+    ///
+    /// ⚠ 判据与 <see cref="rdMaxPieceOnField"/> 严格互补（同一个 `Overlay` 位，一取一否
+    ///   怪兽区位），但**不能**直接写 `!rdMaxPieceOnField(c) && Overlay位` ——
+    ///   那样把 `0x82 = Overlay|Hand`（召唤中间态）也算了进去，而那一族该走
+    ///   `isRdMaximumPiecePending` 那条已有路径（两者都进 rush 也无害，但语义要分开：
+    ///   一个是「还没到场」，一个是「已经走了」）。
+    /// ⚠ 只认「真的在某个有格位分支的区里」（墓地/卡组/除外/额外）—— `0x82` 那种
+    ///   残余区没有格位分支，交给 pending 那条管。
+    /// </summary>
+    private static bool rdMaxPieceGoneOffField(gameCard c)
+    {
+        if (c == null || !isMaximumCard(c))
+        {
+            return false;
+        }
+        if ((c.p.location & (UInt32)CardLocation.Overlay) == 0)
+        {
+            return false;      // 不是素材态，与三件无关
+        }
+        if ((c.p.location & (UInt32)CardLocation.MonsterZone) != 0)
+        {
+            return false;      // 还在场上：正常三件，照旧走 tweens
+        }
+        return (c.p.location & (UInt32)(CardLocation.Grave | CardLocation.Deck
+            | CardLocation.Removed | CardLocation.Extra)) != 0;
+    }
+
+    /// <summary>
+    /// 本侧是不是**已经有完整的另一组三件**了（本体 <paramref name="candBody"/> 那一组之外）。
+    ///
+    /// 给 <see cref="rdMaximumBody"/> 的成组校验当**前提闸**：只有「本侧的新一组三件
+    /// 已经成型」时，才允许用配对校验否定一块旧部件（那才是用户第 3 条那个确定场景）。
+    /// 其余时刻一律不做配对否定，避免误杀「本体已在场、部件 seq 还没归一」的健康中间态
+    /// （那个窗口真机实测 168ms，但慢局/掉帧会拉长，不许赌）。
+    ///
+    /// 判据：把 <paramref name="candBody"/> 当成本体，数一下**配得上它**的部件有几块
+    /// （口径 = <see cref="rdMaxBodyOwnsPiece"/>）。≥2 就是「另一组三件已成型」。
+    /// ⛔ 不调 `rdMaxResolveTrio`（它还会排 `rdMaxHeld` / pending / 旧格位，口径更窄，
+    ///   这里要的只是「这一组是不是已经在位」）。
+    /// </summary>
+    private bool rdMaxSideHasOtherTrio(gameCard piece, gameCard candBody)
+    {
+        if (candBody == null)
+        {
+            return false;
+        }
+        int n = 0;
+        for (int i = 0; i < cards.Count; i++)
+        {
+            gameCard o = cards[i];
+            if (o == null || o == piece || o == candBody || !o.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+            if ((o.p.location & (UInt32)CardLocation.Overlay) == 0)
+            {
+                continue;      // 只数部件
+            }
+            if (rdMaxBodyOwnsPiece(candBody, o))
+            {
+                n++;
+            }
+        }
+        return n >= 2;
+    }
+
+    /// <summary>
+    /// <paramref name="body"/>（一个候选本体）是不是**真的拥有** <paramref name="piece"/>
+    /// 这块素材。口径逐条对齐 <see cref="GCS_cardGetOverlayElements"/>（引擎的素材归属）：
+    ///
+    ///   · 同控制者（`p.controller` 相等）；
+    ///   · 「抠掉 Overlay 位之后」的区号相同；
+    ///   · `p.sequence` 相同。
+    ///
+    /// ⛔ 为什么用这三条而不是卡号：三件卡号确实连号（`120283150/151/152`），但那是**发行规律**，
+    ///   不是引擎契约 —— 异画/别名卡会把相邻关系打乱（本项目 2026-09-24 已实测：
+    ///   `get_code()` 会把 alias 当成本码）。位置归属是引擎自己给的，才是权威。
+    /// ⚠ 这是**严格版**：三条全中才算「拥有」。健康的三件里部件被归一后 `p.sequence`
+    ///   就是本体那一列（2）⇒ 恒成立，不影响正常路径。
+    /// </summary>
+    private bool rdMaxBodyOwnsPiece(gameCard body, gameCard piece)
+    {
+        if (body == null || piece == null)
+        {
+            return false;
+        }
+        if (body.p.controller != piece.p.controller)
+        {
+            return false;
+        }
+        if ((piece.p.location | (UInt32)CardLocation.Overlay)
+            != (body.p.location | (UInt32)CardLocation.Overlay))
+        {
+            return false;
+        }
+        return piece.p.sequence == body.p.sequence;
     }
 
     // ═════════ 部件「本体早就不在了」的兜底（用户 2026-09-24 第二次报告）═════════
@@ -968,6 +1251,120 @@ public class Ocgcore : ServantWithCardDescription
                 continue;
             }
             logRdMaximumPieceState(c);
+        }
+        logRdMaxOffFieldTrio();
+        logRdMaxTrioStateChange();
+    }
+
+    /// <summary>
+    /// 三件状态 `rdMaxTrioMe/Op` **每次变化**落一行，并附上「本侧三张极大卡的 p 值」。
+    ///
+    /// ⛔⛔ 为什么必须有它（2026-09-25 晚八，一次真实回归的教训）：
+    ///   `rdMaxPieceOnField` 第一版写成「带 Overlay 位 **且** 带 MonsterZone 位」——
+    ///   看起来严丝合缝，实际把 **`0x82 = Overlay|Hand`**（core 收素材时真发的区号，
+    ///   见 `maximumPieceWorldPosition` 里那条 ⛔⛔）逼进了**两边都不认的真空**：
+    ///   它不是「在场上」（无怪兽区位）、也不是 `isRdMaximumPiecePending`（第一条就按
+    ///   Overlay 位 return false）⇒ 三件恒不成立 ⇒ **贴紧/放大/大框全不生效**，
+    ///   玩家看到的是「三张卡各自散着、完全不像极大状态」。
+    ///   ⇒ 这个回归**自动化抓不到**：造局探针走的是 `0x84`，`0x82` 只出现在真机路径上。
+    ///     所以补一条**不依赖构造**的探针：只要三件状态翻过一次边就落一行，
+    ///     附带每张的 `p=` —— 真机一眼就能看出「三张明明在场、trio 却是 0」。
+    ///
+    /// ⚠ 读**缓存** `rdMaxTrioMe/Op`（不去调 `rdMaximumTrioComplete`：那会写 `rdMaxPrevPos`）。
+    ///   它与 `logRdMaxOffFieldTrio` 同帧、同源，只是判据口径相反（那条只在「有离场部件」时报）。
+    /// </summary>
+    private string rdMaxTrioStateLast = "";
+    private void logRdMaxTrioStateChange()
+    {
+        string line = "trio me=" + (rdMaxTrioMe ? "1" : "0") + " op=" + (rdMaxTrioOp ? "1" : "0");
+        // 附上本侧三张极大卡的 p（同侧、按 seq 排），三件为什么不成一眼可见。
+        for (int side = 0; side < 2; side++)
+        {
+            line += " | s" + side + ":";
+            int n = 0;
+            for (int i = 0; i < cards.Count && n < 4; i++)
+            {
+                gameCard c = cards[i];
+                if (c == null || !c.gameObject.activeInHierarchy || !isMaximumCard(c))
+                {
+                    continue;
+                }
+                if ((int)c.p.controller != side)
+                {
+                    continue;
+                }
+                line += "[" + c.get_data().Id + " p=" + c.p.location + "/" + c.p.sequence
+                    + " b=" + c.p_beforeOverLayed.location + "/" + c.p_beforeOverLayed.sequence + "]";
+                n++;
+            }
+            if (n == 0)
+            {
+                line += "none";
+            }
+        }
+        if (line != rdMaxTrioStateLast)
+        {
+            rdMaxTrioStateLast = line;
+            QuickTestTrace.Log("max", line);
+        }
+    }
+
+    /// <summary>
+    /// 「已经离场的极大部件」侧的三件状态探针（内容不变只写一次），供
+    /// <c>_verify_rdai_game.py</c> 的 **7x8** 咬「离场后三件必须不再成立」。
+    ///
+    /// 为什么必须单独报这一个数（用户 2026-09-25 第 4 次报告）：
+    ///   三件状态 `rdMaxTrioMe/Op` 决定**大框不掉、一体化继续占用屏幕位置、三张仍放大 1.45**。
+    ///   旧口径里「部件带 Overlay 位」就够，而归位后的部件是 `0x90 = 墓地|Overlay`
+    ///   ⇒ 三件恒成立 ⇒ 卡片被画回场上而 `p.location` 说墓地（截图里那一幕）。
+    ///   `bodyflash` 那条探针**报不了**这个 —— 它挂在**本体**上，本体走了就一行都没有。
+    ///   ⇒ 只要「本侧有离场素材态部件、而 `rdMaxTrioMe/Op` 还是 1」就一定是本 bug 复发，
+    ///     与帧率、消息序、动画全无关，可以稳定地咬（阴性对照 = 注释掉 rdMaxPieceOnField
+    ///     那两闸，本行必出现 `trio=1`）。
+    /// </summary>
+    private string rdMaxOffFieldTrioLast = "";
+    private void logRdMaxOffFieldTrio()
+    {
+        for (int side = 0; side < 2; side++)
+        {
+            bool hasOffPiece = false;
+            for (int i = 0; i < cards.Count; i++)
+            {
+                gameCard c = cards[i];
+                if (c == null || !c.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+                if (!(c.isRdMaximumCard() && (int)c.p.controller == side))
+                {
+                    continue;
+                }
+                if ((c.p.location & (UInt32)CardLocation.Overlay) == 0)
+                {
+                    continue;
+                }
+                if ((c.p.location & (UInt32)CardLocation.MonsterZone) != 0)
+                {
+                    continue;      // 还在场上：正常三件，不归这条管
+                }
+                hasOffPiece = true;
+                break;
+            }
+            if (!hasOffPiece)
+            {
+                continue;          // 没有离场部件：不落行，免得刷屏
+            }
+            // ⚠ 读**缓存**字段（`rdMaxOrphanTick` 跑在 `rdMaxIntegratedTick` 之前，这里是上一帧的值）。
+            //   对「部件都离场了、三件却还报齐」这个**持续态**判据来说，差一帧不影响结论；
+            //   而调 `rdMaximumTrioComplete(side)` 会顺带写 `rdMaxPrevPos`（每帧每卡只能一次，
+            //   见 rdMaxRefreshTrioState）⇒ 宁可用缓存也不去踩那条已知副作用。
+            bool trio = (side == 0 ? rdMaxTrioMe : rdMaxTrioOp);
+            string line = "offtrio ctrl=" + side + " trio=" + (trio ? "1" : "0");
+            if (line != rdMaxOffFieldTrioLast)
+            {
+                rdMaxOffFieldTrioLast = line;
+                QuickTestTrace.Log("max", line);
+            }
         }
     }
 
@@ -1350,11 +1747,73 @@ public class Ocgcore : ServantWithCardDescription
     ///     飞行期那 170ms 的「错侧」是**与卡一致的**（卡此刻真画在那一侧），不是错帧。
     ///     ⛔ 别再用「三张落稳」当换图门（第二轮的过度修正，被用户 2026-09-22 第 2 条否掉）。
     /// </summary>
-    private bool rdMaximumTrioComplete(int controller)
+    public bool rdMaximumTrioComplete(int controller)
     {
         rdMaxRefreshTrioState();
         return controller == 0 ? rdMaxTrioMe : rdMaxTrioOp;
     }
+
+    /// <summary>
+    /// **极大状态下的本体**这一帧该不该亮「悬停白框」（用户 2026-09-25 第 1 条）。
+    /// 由 `gameCard.rdMaxBodyFlashSync` 每帧、以及本体进入 excited 那一帧调用。
+    ///
+    /// 为什么需要它：极大状态下场上是**三张**卡，而三张的档位不同 ——
+    ///   · L/R 部件是 `floating_clickable`（这是刻意的，见 realize 摆位循环那段长注释：
+    ///     部件不能带「场上表侧怪兽」的竖立绘/怪兽云/等级），那一档的原生行为就是
+    ///     `ES_enter_excited` 里 `flash_line_on()` ⇒ **有白框**；
+    ///   · 本体是 `verticle_clickable`（真·场上表侧怪兽），**原生没有白框**。
+    /// ⇒ 用户看到的「只有左右两个部件有白框、中间那个没有」。三件既然是一体的，
+    ///   框就该一致。
+    ///
+    /// 条件（两道，缺一不可）：
+    ///   ① **本侧三件齐** = 真的处于极大状态 ⇒ 单独在场的极大怪兽**不受影响**
+    ///      （那时本体就是普通场上怪兽，原生无框，不许凭空点亮）；
+    ///   ② **本体自己被悬停**（<paramref name="pointed"/>，调用方用 ES_mouse_check 给）。
+    ///
+    /// ⛔⛔ **2026-09-25 晚三修正：`zoom`（一体化放大中）这一半已被用户否掉。**
+    ///   原判据是 `trio && (pointed || zoom)`：本意是「悬浮 L/R 时三件一体、中间也该有框」，
+    ///   但三张卡各自挂一个框、各贴自己卡面（`MouseFlash` 是**每张卡一份**，见
+    ///   gameCard.flash_line_on），三张并排 ⇒ 三条独立边线**视觉上连成一大条**，
+    ///   而且「选别的部件时中间也亮」正是用户报的那个现象。
+    ///   ⇒ 回归「**光标压着哪张，就只亮哪张**」：只有 `pointed` 才算。
+    ///   `zoom` 仍留在诊断行里（判据要看「不是 pointed 就不会亮」这件事，见
+    ///   `_verify_rdai_game.py` 7z5/7z7 与 `_verify_maxpiece_col.py` P3b 的**反向**口径）。
+    /// ⛔ 只读、无副作用：`rdMaximumTrioComplete` 有帧闩（`rdMaxStateFrame`），
+    ///   同帧多调几次不会踩 `rdMaxPrevPos`。
+    /// ⛔ 不读设置项 `rdMaxIntegrated_`：这是**极大状态的观感**，不是那个开关的附庸。
+    /// </summary>
+    public bool RdMaxBodyFrameFlash(int controller, bool pointed)
+    {
+        bool inRange = GameModeManager.IsRD && controller >= 0 && controller <= 1;
+        bool trio = inRange && rdMaximumTrioComplete(controller);
+        bool zoom = inRange && rdMaxZoomOwn(controller) && rdMaxZoomK(controller) > 0.01f;
+        bool on = trio && pointed;
+        // 诊断（仅 qt_debug.on）：本侧判定结果**变化时**落一行 —— 验收咬它，别拿帧数当判据。
+        // ⛔ 去重键**不含 k**（k 每帧都在动，带上它就成了逐帧刷屏）；k 只作为当时的参考值打出来。
+        if (QuickTestTrace.Enabled && inRange)
+        {
+            // ⛔⛔ 去重键**不含 k**：k 每帧都在动（12/s 朝目标收敛），把它拼进去就等于逐帧落行
+            //   —— 2026-09-25 实测一局刷出 159 条，全是同一个判定态、只有 k 在变。
+            //   判定态（on/trio/pointed/zoom）才是判据关心的东西；k 只作为**落行那一刻**的
+            //   参考值打出来（7z5/7z6/7z7 三条判据都不咬 k，见 _verify_rdai_game.py）。
+            string key = "on=" + (on ? "1" : "0") + " trio=" + (trio ? "1" : "0")
+                + " pointed=" + (pointed ? "1" : "0") + " zoom=" + (zoom ? "1" : "0");
+            string line = "bodyflash ctrl=" + controller + " " + key
+                + " k=" + rdMaxZoomK(controller).ToString("0.00");
+            if (controller == 0)
+            {
+                if (key != rdMaxBodyFlashLast0) { rdMaxBodyFlashLast0 = key; QuickTestTrace.Log("max", line); }
+            }
+            else
+            {
+                if (key != rdMaxBodyFlashLast1) { rdMaxBodyFlashLast1 = key; QuickTestTrace.Log("max", line); }
+            }
+        }
+        return on;
+    }
+
+    /// <summary>`[max] bodyflash` 的每侧去重（键里不含 k，理由见 RdMaxBodyFrameFlash）。</summary>
+    private string rdMaxBodyFlashLast0 = "", rdMaxBodyFlashLast1 = "";
     /// <summary>
     /// 本帧「极大怪兽三件」的两个判据，每侧各一位 —— **谁要都读这几个字段**：
     ///   · <c>齐</c>（Trio）＝ 中区三列（seq 1/2/3）站着同一侧的三件。**不看位置**。
@@ -1686,6 +2145,13 @@ public class Ocgcore : ServantWithCardDescription
             uint q;
             if ((c.p.location & (UInt32)CardLocation.Overlay) != 0)
             {
+                // ⛔⛔ 同 rdMaxResolveTrio 那一闸：`0x90 = 墓地|Overlay` 也带 Overlay 位，
+                //   不加「在不在场上」这一条，本体离场后三件仍报「齐」⇒ 大框不掉、
+                //   三张仍按大框口径放大贴紧（用户 2026-09-25 第 4 次报告，见 rdMaxPieceOnField）。
+                if (!rdMaxPieceOnField(c))
+                {
+                    continue;
+                }
                 q = c.p_beforeOverLayed.sequence;
                 if ((c.p_beforeOverLayed.location & (UInt32)CardLocation.MonsterZone) == 0)
                 {
@@ -1788,7 +2254,7 @@ public class Ocgcore : ServantWithCardDescription
         {
             return nativePos;
         }
-        bool isPiece = (c.p.location & (UInt32)CardLocation.Overlay) != 0;
+        bool isPiece = rdMaxPieceOnField(c);
         bool inZone = (c.p.location & (UInt32)CardLocation.MonsterZone) != 0;
         if (!isPiece && !(inZone && c.p.sequence >= 1 && c.p.sequence <= 3))
         {
@@ -1813,7 +2279,10 @@ public class Ocgcore : ServantWithCardDescription
         if (GameModeManager.IsRD && c != null && isMaximumCard(c))
         {
             bool op = c.p.controller != 0;
-            bool isPiece = (c.p.location & (UInt32)CardLocation.Overlay) != 0;
+            // ⛔ 部件那一支必须用 rdMaxPieceOnField（「还挂着素材态」**且**「还在场上」）：
+            //   只问 Overlay 位的话，归位到 0x90 的部件仍会被撑成 1.45 倍并长期不还原
+            //   （用户 2026-09-25 第 4 次报告，见 rdMaxPieceOnField）。
+            bool isPiece = rdMaxPieceOnField(c);
             bool inZone = (c.p.location & (UInt32)CardLocation.MonsterZone) != 0;
             want = (op ? trioOp : trioMe)
                 && (isPiece || (inZone && c.p.sequence >= 1 && c.p.sequence <= 3));
@@ -1835,6 +2304,432 @@ public class Ocgcore : ServantWithCardDescription
     {
         return "(" + ((int)Math.Round(v.x * 100.0)) + "," + ((int)Math.Round(v.y * 100.0))
             + "," + ((int)Math.Round(v.z * 100.0)) + ")";
+    }
+
+    // ═════════════ 极大怪兽一体化（设置项 rdMaxIntegrated_，仅 RD、默认开）═════════════
+    //
+    // 需求（用户 2026-09-25）：**三件齐**的极大怪兽被鼠标悬浮时，三个部件**不再各自单独放大**，
+    //   而是「三件 + 极大立绘」**视为一体**一起放大；**单独在场**的极大怪兽不受影响；
+    //   点 L/R 部件等效点中间件（卡面点击转发 → RdMaximumClickTarget；悬浮 L/R 时浮出本体按钮）；
+    //   左侧说明栏保持「显示你悬浮的那张部件」自己的资料。
+    //
+    // 为什么这么实现（都从既有代码里核实过，见各自的注释）：
+    //   · 三件是**三个独立 gameCard**，卡根没有共同父（create 不带 father）⇒ 统一放大只能走
+    //     **屏幕空间以本体屏点为轴的等比缩放**，不能挂父节点、更不能改 scale。
+    //   · 「悬浮放大」本来就不是写 scale，而是 close-up：把被悬浮那张卡沿相机视线**拉近 10**。
+    //     本功能就是把这套「拉近」改成「三张共用一个放大倍率 m、以本体屏点 C 为轴」——
+    //     m 从本体算，三张共用 ⇒ 彼此仍严丝合缝（间距与卡宽同时 ×m）。
+    //   · 立绘每帧由 `card_verticle_drawing_handler` 挂在**卡面位置**上、世界尺寸恒定
+    //     （`Program.verticleScale`，与世界深度无关）⇒ 卡面朝镜头前移时立绘自动同步放大，
+    //     **立绘一句代码都不用改**。
+    //   · ⛔ `localScale` 已被三方占用（本体 1.45 / 手牌行 / 暂存 0.001）⇒ 全程**只写 position**。
+    //   · ⛔ 不调 `rdMaxRefreshTrioState`（有副作用：写 `rdMaxPrevPos`）、也不看 `rdMaxSettled*`
+    //     （落稳判据拿「这一帧没动」与上一帧比，卡被我们挪动后会永久判成在动 ⇒ 用它会自毁）
+    //     —— 这里**自己扫 cards** 出一份无副作用的「三件」快照。
+    //   · ⛔ 判本体必须用严格口径（同侧 + 带怪兽区位 + **不带 Overlay**）；绝不用
+    //     `rdMaximumFather`（只要求 seq==2，而两张部件的 `p.sequence` 也是 2 ⇒ 会互认）。
+
+    /// <summary>一体放大把整组「朝镜头拉近」多少世界单位 —— 与 gameCard 现有 close-up 的 10
+    /// 同口径 ⇒ 观感与「单卡查看」一致（m = d / (d - 10)；d ≈ 33 时 m ≈ 1.45，即既有 1.45 档）。</summary>
+    private const float RdMaxIntegratedPull = 10f;
+
+    /// <summary>收敛速度（1/s）：k 每帧朝目标插值，约 0.5s 到位的观感（与既有 close-up 同量级）。</summary>
+    private const float RdMaxIntegratedGain = 12f;
+
+    /// <summary>收敛系数（每侧一份）：0 = 完全在原位，1 = 放大到位。</summary>
+    private float rdMaxZoomKMe, rdMaxZoomKOp;
+
+    /// <summary>本帧查到的三件（[0]=本体、[1]=L、[2]=R）；[0]==null 表示这一侧没有成立的三件。</summary>
+    private gameCard[] rdMaxZoomCardsMe = new gameCard[3];
+    private gameCard[] rdMaxZoomCardsOp = new gameCard[3];
+
+    /// <summary>本帧这一侧是否**正在占用**这三张卡的位置（= 我们写过位置，k&gt;0）。
+    /// gameCard 的 close-up / exit 用它早退，避免与本 tick 抢位置。</summary>
+    private bool rdMaxZoomOwnMe, rdMaxZoomOwnOp;
+
+    /// <summary>本帧共用的放大倍率（从本体算）—— 探针用。</summary>
+    private float rdMaxZoomMMe = 1f, rdMaxZoomMOp = 1f;
+
+    /// <summary>`[maxzoom]` 探针去重（每侧一份）：内容没变就不落行。</summary>
+    private string rdMaxZoomProbeLast0 = "", rdMaxZoomProbeLast1 = "";
+
+    private gameCard[] rdMaxZoomArr(int side) { return side == 0 ? rdMaxZoomCardsMe : rdMaxZoomCardsOp; }
+    private float rdMaxZoomK(int side) { return side == 0 ? rdMaxZoomKMe : rdMaxZoomKOp; }
+    private void rdMaxZoomSetK(int side, float k) { if (side == 0) rdMaxZoomKMe = k; else rdMaxZoomKOp = k; }
+    private bool rdMaxZoomOwn(int side) { return side == 0 ? rdMaxZoomOwnMe : rdMaxZoomOwnOp; }
+    private void rdMaxZoomSetOwn(int side, bool v) { if (side == 0) rdMaxZoomOwnMe = v; else rdMaxZoomOwnOp = v; }
+
+    /// <summary>设置项（键 `rdMaxIntegrated_`，仅 RD 可见、**默认开**）。每帧实时读 Config，
+    /// 不缓存、不订阅 —— 与 `askMset_` 那条同一口径（改完立刻生效，不必重开窗口）。</summary>
+    private bool rdMaxIntegratedOn()
+    {
+        return GameModeManager.IsRD
+            && UIHelper.fromStringToBool(Config.Get("rdMaxIntegrated_", "1"));
+    }
+
+    /// <summary>
+    /// 「极大怪兽一体化」的**每帧入口**（挂在 <see cref="preFrameFunction"/> 里，见那里的调用点）。
+    ///
+    /// 时序：`Program.Update` 先把本帧的 `pointedGameObject` 算好，再跑 `preFrameFunction`，
+    /// 最后才逐个 `gameCard.Update`（close-up / button shower 都在那里）⇒ 本 tick 处在
+    /// 「最新鼠标命中之后、所有卡表现之前」，所以它写的位置与置的托管标记当帧就会被读到。
+    /// 只在 RD 生效、`cards.Count == 0`（菜单 / 加载中）或非决斗态直接早退 ⇒ OCG 一个像素不变。
+    /// </summary>
+    public void rdMaxIntegratedTick()
+    {
+        if (!GameModeManager.IsRD || condition == Condition.N || cards.Count == 0)
+        {
+            rdMaxIntegratedReset();
+            return;
+        }
+        bool on = rdMaxIntegratedOn();
+        rdMaxIntegratedSide(0, on);
+        rdMaxIntegratedSide(1, on);
+        if (QuickTestTrace.Enabled)
+        {
+            logRdMaxZoomProbe(0);
+            logRdMaxZoomProbe(1);
+        }
+    }
+
+    /// <summary>清理两侧状态（对局收尾 / 切模式 / <see cref="hide"/>）。被我们挪动过的三张各回位一次。</summary>
+    public void rdMaxIntegratedReset()
+    {
+        for (int side = 0; side < 2; side++)
+        {
+            if (rdMaxZoomArr(side)[0] != null)
+            {
+                rdMaxZoomRelease(side, rdMaxZoomOwn(side));
+            }
+            rdMaxZoomSetK(side, 0f);
+            rdMaxZoomSetOwn(side, false);
+            if (side == 0) rdMaxZoomMMe = 1f; else rdMaxZoomMOp = 1f;
+        }
+        rdMaxZoomProbeLast0 = "";
+        rdMaxZoomProbeLast1 = "";
+    }
+
+    /// <summary>
+    /// 把这一侧**上一帧记的三张**收干净并清空名单。两件事各自独立：
+    ///   · <paramref name="releasePositions"/> = 把三张放回各自的原位（<c>TweenTo(accurate_position)</c>）。
+    ///     ⚠ 只有「确实挪动过位置」（k&gt;0）才需要 —— k==0 时位置本来就是准的，无脑 TweenTo
+    ///     反而会在 realize 的补间（飞入 / 撤回 / 重排）上插一脚。
+    ///   · 按钮托管则**总是**要解除（否则旧本体永远不肯 hide，按钮会一直挂在那儿）。
+    /// </summary>
+    private void rdMaxZoomRelease(int side, bool releasePositions)
+    {
+        gameCard[] a = rdMaxZoomArr(side);
+        gameCard body = a[0];
+        for (int i = 0; i < 3; i++)
+        {
+            gameCard c = a[i];
+            // 只回收「还在场上的」：已经离场的卡由 realize / 归位兜底管，这里别去 tween 它们。
+            if (releasePositions && c != null && c.gameObject != null
+                && c.gameObject.activeInHierarchy)
+            {
+                c.ES_safe_card_move_to_original_place();
+            }
+            a[i] = null;
+        }
+        rdMaxZoomReleaseButtons(body);
+    }
+
+    /// <summary>解除某个本体上的「按钮托管」：夺回权 + （它自己没在 excited 时）把按钮收掉。
+    /// 它自己还在 excited 的话，按钮归它自己的 ES 管，别去抢。</summary>
+    private void rdMaxZoomReleaseButtons(gameCard body)
+    {
+        if (body != null && body.rdMaxIntegratedButtonOwned)
+        {
+            body.rdMaxIntegratedButtonOwned = false;
+            if (!body.ES_isExcited)
+            {
+                body.ES_hideButtonsForRdMaxIntegrated();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 一侧的一帧：解析三件 → 判「有没有被指着」→ 收敛 k → 按屏幕空间等比缩放写三张的位置
+    /// （+ 托管本体按钮）。**只有 k&gt;0 时才写 position** —— k 归 0 后一次也不写，
+    /// 否则会和 realize 的 `TweenTo`（飞入 / 撤回 / 重排）抢位置。
+    /// </summary>
+    private void rdMaxIntegratedSide(int side, bool on)
+    {
+        // ⚠ 必须先给 out 形参一个初值：`on` 为 false 时 `&&` 短路、rdMaxResolveTrio 根本不会被调用，
+        //   而 C# 要求「可能未赋值」的变量不能读 ⇒ 显式初始化（值仍是「这一侧没有三件」的 null）。
+        gameCard body = null, pl = null, pr = null;
+        bool valid = on && rdMaxResolveTrio(side, out body, out pl, out pr);
+        gameCard[] a = rdMaxZoomArr(side);
+
+        bool sameGroup = valid && a[0] == body && a[1] == pl && a[2] == pr;
+        if (!sameGroup)
+        {
+            // 换组（含「上一组散伙 / 本体被换掉」）：把上一组收干净，再换上新组（或清空）。
+            // ⚠ 位置只在「确实挪动过」（k&gt;0）时才回收（理由见 rdMaxZoomRelease）；
+            //   按钮托管则**无条件**解除 —— 少了这一句，「上一次 hover 让 owned=true、
+            //   但 k 还没起来组就散了」这种情形下，旧本体会永远不肯 hide（按钮残留）。
+            if (a[0] != null)
+            {
+                rdMaxZoomRelease(side, rdMaxZoomOwn(side));
+            }
+            rdMaxZoomSetK(side, 0f);
+            rdMaxZoomSetOwn(side, false);
+        }
+        if (!valid)
+        {
+            return;
+        }
+        a[0] = body; a[1] = pl; a[2] = pr;
+
+        bool hovered = body.ES_hoveredByPointer()
+            || pl.ES_hoveredByPointer() || pr.ES_hoveredByPointer();
+
+        float k = rdMaxZoomK(side);
+        k += ((hovered ? 1f : 0f) - k) * Math.Min(1f, Program.deltaTime * RdMaxIntegratedGain);
+        if (k < 0.002f)
+        {
+            k = 0f;                       // 收尾阈值：避免永远差一点点
+        }
+        rdMaxZoomSetK(side, k);
+
+        bool own = k > 0f;
+        if (own && Program.camera_game_main != null)
+        {
+            Vector3 baseBody = body.UA_get_accurate_position();
+            Vector3 spBody = Program.camera_game_main.WorldToScreenPoint(baseBody);
+            // 共同 m：从**本体**算（本体在中列 ⇒ 它的屏点就是整组的视觉中心 C）。
+            // z 太近（贴脸）时退化成 1，免得 m 爆掉。
+            float m = spBody.z > RdMaxIntegratedPull + 0.5f
+                ? spBody.z / (spBody.z - RdMaxIntegratedPull)
+                : 1f;
+            if (side == 0) rdMaxZoomMMe = m; else rdMaxZoomMOp = m;
+            for (int i = 0; i < 3; i++)
+            {
+                gameCard c = a[i];
+                if (c == null || c.gameObject == null)
+                {
+                    continue;
+                }
+                // 底座永远取 accurate_position（realize 摆到哪儿）：缩放期间它不变，
+                // 于是「谁在什么时候动过」都不会与本 tick 打架。
+                Vector3 b = c.UA_get_accurate_position();
+                Vector3 sp = Program.camera_game_main.WorldToScreenPoint(b);
+                Vector2 tgt = new Vector2(spBody.x + (sp.x - spBody.x) * m,
+                                          spBody.y + (sp.y - spBody.y) * m);
+                float z = sp.z / m;       // 深度收到 1/m ⇒ 屏幕尺寸 ×m
+                Vector3 want = Program.camera_game_main.ScreenToWorldPoint(
+                    new Vector3(tgt.x, tgt.y, z));
+                // ⛔ 不 lerp「当前 → want」（阻尼目标会漂）；一律 Lerp(底座, 目标, k)。
+                c.gameObject.transform.position = Vector3.Lerp(b, want, k);
+            }
+        }
+        else if (rdMaxZoomOwn(side))
+        {
+            // 刚从「占用中」退出：把三张精确写回底座一次，之后一帧都不再写。
+            for (int i = 0; i < 3; i++)
+            {
+                gameCard c = a[i];
+                if (c != null && c.gameObject != null)
+                {
+                    c.gameObject.transform.position = c.UA_get_accurate_position();
+                }
+            }
+        }
+        rdMaxZoomSetOwn(side, own);
+
+        // ── D 按钮托管：三件里任一张被指着 ⇒ 把**本体**的选项按钮浮出来 ──
+        //    tick 早于 gameCard.Update ⇒ 本帧先置 owned 再 show；夺回权时**先**置 false 再 hide，
+        //    本体同帧看到的已是最新值 ⇒ 不会出现「hide 完下一帧再 show」的闪烁。
+        //    关掉选项 / 三件散伙时，owned 由上面的 release 分支解除。
+        if (hovered)
+        {
+            body.rdMaxIntegratedButtonOwned = true;
+            body.ES_showButtonsForRdMaxIntegrated();
+        }
+        else if (body.rdMaxIntegratedButtonOwned)
+        {
+            body.rdMaxIntegratedButtonOwned = false;
+            if (!body.ES_isExcited)
+            {
+                body.ES_hideButtonsForRdMaxIntegrated();
+            }
+        }
+    }
+
+    /// <summary>
+    /// **无副作用**地扫出某一侧的三件（本体 + 两张带 Overlay 的部件）。三个都齐才算成立
+    /// ⇒「单独在场的极大怪兽」（单体召唤的本体 / 还没收成素材的部件）一律不受影响。
+    ///
+    /// 判据：
+    ///   · 同侧（`p.controller == side`）+ 极大卡 + `activeInHierarchy`；
+    ///   · 排除 `rdMaxHeld`（三件同帧入场的暂存，缩到 0.001）与 `isRdMaximumPiecePending`
+    ///     （极大召唤中间态：已经落到场上、还没被 `Duel.Overlay` 收成素材的那一瞬）；
+    ///   · **本体** = 带怪兽区位且**不带 Overlay**（严格口径）；
+    ///   · **部件** = 带 Overlay，且「成为素材前的格位」落在中区左右两列（1 / 3）
+    ///     —— 效果直接贴上来的素材没有这段旧格位，不算。
+    /// ⛔ 不调 `rdMaxRefreshTrioState`（有副作用）、不看 `rdMaxSettled*`。
+    /// </summary>
+    private bool rdMaxResolveTrio(int side, out gameCard body, out gameCard l, out gameCard r)
+    {
+        body = null; l = null; r = null;
+        for (int i = 0; i < cards.Count; i++)
+        {
+            gameCard c = cards[i];
+            if (c == null || !c.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+            if (!isMaximumCard(c) || (int)c.p.controller != side)
+            {
+                continue;
+            }
+            if (c.rdMaxHeld || isRdMaximumPiecePending(c))
+            {
+                continue;
+            }
+            if ((c.p.location & (UInt32)CardLocation.Overlay) != 0)
+            {
+                // ⛔⛔ 「带 Overlay 位」**不等于**「还是三件里的那块部件」：归位后的部件
+                //   是 `0x90 = 墓地|Overlay`，Overlay 位照样在（见 rdMaxPieceOnField）。
+                //   少了这一闸，本体一走、大框与一体化都因为「部件还在」而不收，
+                //   屏幕上的表现正是用户报的「部件从墓地回场上 + 墓地字样」。
+                if (!rdMaxPieceOnField(c))
+                {
+                    continue;      // 已经不在场上（墓地/卡组/除外/额外）：不是这一组三件了
+                }
+                GPS before = c.p_beforeOverLayed;
+                if ((before.location & (UInt32)CardLocation.MonsterZone) == 0)
+                {
+                    continue;      // 效果直接贴上去的素材：没有「旧格位」⇒ 不算极大召唤的部件
+                }
+                if (before.sequence == 1) l = c;
+                else if (before.sequence == 3) r = c;
+                continue;
+            }
+            if ((c.p.location & (UInt32)CardLocation.MonsterZone) == 0)
+            {
+                continue;          // 手牌 / 墓地 / 卡组 / 额外里躺着的极大卡
+            }
+            body = c;
+        }
+        return body != null && l != null && r != null;
+    }
+
+    /// <summary>
+    /// 这张卡的位置此刻是不是正被「极大怪兽一体化」占用（本帧三件之一且 k&gt;0）。
+    /// gameCard 的 close-up 早退与 exit 跳过回位都问它。
+    /// </summary>
+    public bool RdMaxIntegratedOwnsPosition(gameCard c)
+    {
+        if (c == null || !GameModeManager.IsRD)
+        {
+            return false;
+        }
+        int s = (int)c.p.controller;
+        if (s != 0 && s != 1)
+        {
+            return false;
+        }
+        if (!rdMaxZoomOwn(s))
+        {
+            return false;
+        }
+        gameCard[] a = rdMaxZoomArr(s);
+        return a[0] == c || a[1] == c || a[2] == c;
+    }
+
+    /// <summary>
+    /// 点 L/R 部件 / 召唤中间态的部件时，**该被当成哪张卡来点**（入口在 gameCard.RefreshFunction_ES）。
+    ///   · 非部件（含普通卡、本体自己）⇒ 原样返回（**旧行为逐字节不变**）；
+    ///   · 部件 / 召唤中间态 ⇒ 返回它的**本体**（严格版口径，见 rdMaximumBody）；
+    ///     本体找不到（孤儿部件）⇒ 返回 null ⇒ 调用方**不发包**；
+    ///   · 选项关掉 ⇒ 部件一律返回 null（退回今天「点部件没反应」）。
+    /// 发动 / 攻击仍由**本体**发出 ⇒ 服务器天然保证不能反复发动 / 反复攻击。
+    /// </summary>
+    public gameCard RdMaximumClickTarget(gameCard c)
+    {
+        if (c == null)
+        {
+            return null;
+        }
+        if (!(c.isRdMaximumPiece() || isRdMaximumPiecePending(c)))
+        {
+            return c;
+        }
+        bool on = rdMaxIntegratedOn();
+        gameCard target = on ? rdMaximumBody(c) : null;
+        if (QuickTestTrace.Enabled)
+        {
+            // `[maxclick]` 探针：转发**只在点部件时**才落行（普通卡点击不落，免得刷屏）。
+            // 验收咬 `from != target`（点了 L/R，真正被点的是本体）与 `target` 不带 Overlay。
+            QuickTestTrace.Log("maxclick",
+                "from=" + (c.isRdMaximumPiece() ? "piece" : "pending")
+                + " code=" + c.get_data().Id
+                + " on=" + (on ? 1 : 0)
+                + " target=" + (target == null ? "none" : ("body code=" + target.get_data().Id)));
+        }
+        return target;
+    }
+
+    /// <summary>
+    /// `[maxzoom]` 探针（每侧一行，内容变了才落）：一体放大的 k / m / 是否占用位置，以及
+    /// 三张卡各自的「逻辑矩形 base（按 accurate_position 算）vs 实际矩形 cur」与「谁被指着 hit」，
+    /// 外加本体的立绘矩形（cur / base）。
+    ///
+    /// 为什么同时给 base 与 cur：验收要量的是**比例**（三张 cur 宽 / base 宽 ≈ m、立绘同理），
+    /// base 用 `probe_face_rect_at(accurate_position)` 算 —— 与本 tick 写的目标同源，
+    /// 所以「放大倍率对不对」是自洽地量出来的，不靠猜。只在 log/qt_debug.on 下有开销。
+    /// </summary>
+    private void logRdMaxZoomProbe(int side)
+    {
+        gameCard[] a = rdMaxZoomArr(side);
+        if (a[0] == null)
+        {
+            return;
+        }
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.Append("side=").Append(side)
+          .Append(" k=").Append(rdMaxZoomK(side).ToString("F3"))
+          .Append(" m=").Append((side == 0 ? rdMaxZoomMMe : rdMaxZoomMOp).ToString("F3"))
+          .Append(" own=").Append(rdMaxZoomOwn(side) ? 1 : 0);
+        // cx/cy = 这一帧用的**轴心 C**（本体的 base 屏点，客户区左上原点）。验收要按
+        // 「三张的屏幕中心以 C 为轴、按倍率 f=1+k(m-1) 等比移动」量刚体性 —— 没有 C 就只能
+        // 拿「本体 base 矩形中心」近似，会有 1~2px 的系统偏差。这里直接把它报出来。
+        if (Program.camera_game_main != null)
+        {
+            Vector3 spBody = Program.camera_game_main.WorldToScreenPoint(
+                a[0].UA_get_accurate_position());
+            sb.Append(" cx=").Append((int)Math.Round(spBody.x))
+              .Append(" cy=").Append(Screen.height - (int)Math.Round(spBody.y));
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            gameCard c = a[i];
+            if (c == null || c.gameObject == null)
+            {
+                continue;
+            }
+            sb.Append(" role=").Append(i == 0 ? "body" : (i == 1 ? "L" : "R"))
+              .Append(" code=").Append(c.get_data().Id)
+              .Append(" base=").Append(c.probe_face_rect_at(c.UA_get_accurate_position()))
+              .Append(" cur=").Append(c.probe_face_rect())
+              .Append(" hit=").Append(c.ES_hoveredByPointer() ? 1 : 0);
+        }
+        // 立绘只看本体：它挂在**本体的卡面**上（部件没有立绘，见 UA_give_condition）。
+        sb.Append(" vert=").Append(a[0].probe_verticle_rect())
+          .Append(" vertbase=").Append(a[0].probe_verticle_rect_base());
+        string s = sb.ToString();
+        if (side == 0)
+        {
+            if (s == rdMaxZoomProbeLast0) return;
+            rdMaxZoomProbeLast0 = s;
+        }
+        else
+        {
+            if (s == rdMaxZoomProbeLast1) return;
+            rdMaxZoomProbeLast1 = s;
+        }
+        QuickTestTrace.Log("maxzoom", s);
     }
 
     /// <summary>
@@ -1889,7 +2784,16 @@ public class Ocgcore : ServantWithCardDescription
             Vector3? want = maximumPieceWorldPosition(c) == null
                 ? (Vector3?)null
                 : rdMaximumWantPosition(c, trioMe, trioOp);
-            Vector3 pos = c.gameObject.transform.position;
+            // 🔑 「极大怪兽一体化」放大期间：本 tick 会把这三张卡**视觉上**朝镜头拉近，
+            //   但那是表现层位移、不是它的逻辑位置 ⇒ 探针必须报**逻辑位置**
+            //   （accurate_position = realize 摆到哪儿 / want），否则
+            //   `_verify_rdai_game.py` 的 6j9/6q/6q1（got==want）会红；
+            //   frect 同理按逻辑位置算（base 口径）—— 6t 的 texel↔屏幕交叉验算
+            //   量与「框贴住卡」的换算基准，拿放大后的矩形去算会把余量放大 m 倍。
+            //   ⚠ 未托管时这两处与原实现逐字节相同（OCG / 非放大期零影响）。
+            bool zoomOwned = RdMaxIntegratedOwnsPosition(c);
+            Vector3 pos = zoomOwned ? c.UA_get_accurate_position()
+                                    : c.gameObject.transform.position;
             Vector3 sp = Program.camera_game_main.WorldToScreenPoint(pos);
             YGOSharp.Card raw = rawCardOf(c);
             sb.Append(" | code=").Append(c.get_data().Id)
@@ -1925,7 +2829,9 @@ public class Ocgcore : ServantWithCardDescription
               //   「RD 大框的描边离卡的外沿几个像素」——「三张无缝拼接 + 一个大框框住」
               //   才有一个不靠猜的判据（见 gameCard.probe_face_rect）。
               // ⚠ 放在 txt 之前：txt 的 `[^|]*` 会吃到记录尾。
-              .Append(" frect=").Append(c.probe_face_rect())
+              .Append(" frect=").Append(zoomOwned
+                  ? c.probe_face_rect_at(c.UA_get_accurate_position())
+                  : c.probe_face_rect())
               .Append(" fsize=").Append(c.probe_face_size())
               .Append(" txt=").Append(c.probe_hint_text.Replace("|", "/"));
         }
@@ -3268,6 +4174,14 @@ public class Ocgcore : ServantWithCardDescription
         undoReplayTick();
         undoAutoTick();
         undoHotkeyTick();
+        // 🔑 「极大怪兽一体化」（设置项 rdMaxIntegrated_，仅 RD、默认开）：读**本帧最新**的
+        //   鼠标命中（`Program.pointedGameObject` 在本帧更早处已更新），把三件齐的极大怪兽
+        //   按「共同 m、以本体屏点为轴」一体放大；同时托管本体的选项按钮。
+        //   ⛔ 只写 position（scale 被本体 1.45 / 手牌行 / 暂存 0.001 三方占用）。
+        //   ⛔ 本 tick 必须排在 gameCard.Update（close-up / button shower）**之前** ——
+        //     preFrameFunction 就是那个位置，所以它置的标记当帧生效、不用等下一帧。
+        //   非 RD / 菜单 / 非决斗态内部直接 reset 早退 ⇒ OCG 侧一个像素不变。
+        rdMaxIntegratedTick();
         optionDumpTick();
         deckMemoToggleTick();
         deckMemoButtonTick();
@@ -11528,8 +12442,14 @@ public class Ocgcore : ServantWithCardDescription
                     //    这一帧直接出现在本体两侧。素材收完（Overlay 之后）走原 tweens。
                     //    snap 同时 clearITWeen ⇒ 顺手把任何残存的 confirm 补间也清干净
                     //    （见 ConfirmCards 里 rdMaxSkipShow 那段注释的「卡停半路」病根）。
+                    // 🔑 2026-09-25 第 5 次报告：**同一条 `rush` 还要罩住「刚离场的部件」** ——
+                    //    本体一进墓，core 同帧把三张全指向墓地列，`rush=0` 时三张各飞一段
+                    //    ⇒ 那 170ms 里 L/R 停在自己的格位、中间空一格 = 用户说的「散开」，
+                    //    随后才慢吞吞飞向墓地 = 「部件滞留 + 从场上飞走」。判据与物证见
+                    //    rdMaxPieceGoneOffField。
                     cards[i].UA_flush_all_gived_witn_lock(
-                        rush || isRdMaximumPiecePending(cards[i]));
+                        rush || isRdMaximumPiecePending(cards[i])
+                             || rdMaxPieceGoneOffField(cards[i]));
                 }
 
         logMaximumProbe();
@@ -12299,8 +13219,25 @@ public class Ocgcore : ServantWithCardDescription
         //   core 紧跟着发的「素材摘到墓地」MOVE（from=0x90/0/0）也还能对得上，不会另建对象。
         //   ⛔ 重规整已经跟过的（seq 恰好对上的那一族）跳过，避免 pos 被加两次。
         //   ⛔ 本体在怪兽区内挪动不触发（那种走 MZ→MZ 的换位，另有路径管）。
+        //   ⛔⛔ 2026-09-25 晚九（用户第 6 次报告，物证 log/qt_8516.log）：再加一道
+        //     「**终点不带 Overlay 位**」闸。点燃判据原来只看「新位置无怪兽区位」，可
+        //     「收集」类 MOVE 的终点本来就带 Overlay 位 —— 极限召唤「先收素材、本体
+        //     还在手牌」时，core 把场上的部件/单张收进手里那套三件，终点实测就是
+        //     **0x82 = Overlay|Hand**（21:01:01.061 `piece-mv … to=0x82/0/1`）。这种
+        //     消息的 card_from（被收的那张极大卡）在收之前恰好站在怪兽区、不带
+        //     Overlay ⇒ fill 一定会收罗同侧**别的**在场素材 ⇒ 点燃把它们也劫去 0x82
+        //     ⇒ 客户端与 core 从此错位：core 后续的 `from=0x90/1/0` 对不上 → 凭空造
+        //     第二份对象 → 真身滞留 0x82 被下一只本体的对齐循环领养 → 与真 L 叠位，
+        //     封闸计数被撑到 2 ⇒ **真 R 件被孤儿兜底误停墓地**（21:01:02.089
+        //     `orphan-park id=120283152`）⇒ 三件散伙 + 缩回 1.0 倍 + 墓地字样。
+        //     本局实测 3 次点燃**全部** father->0x82（21:00:56.155 / 21:01:01.060 /
+        //     21:01:42.784），无一合法。判据：**本体离场的合法终点（墓地 0x10 /
+        //     手牌 0x02 / 卡组 0x01 / 除外 0x20 / 额外 0x40）全都不带 Overlay 位；
+        //     终点带 Overlay 位只有一种语义 —— 这张卡自己被收成了素材**，它的去向
+        //     由它自己的 MOVE + overlay-fix 归一管，跟「跟随」无关。
         if (rdMaxFollowPieces != null
-            && (card_from.p.location & (UInt32)CardLocation.MonsterZone) == 0)
+            && (card_from.p.location & (UInt32)CardLocation.MonsterZone) == 0
+            && (card_from.p.location & (UInt32)CardLocation.Overlay) == 0)
         {
             for (int i = 0; i < rdMaxFollowPieces.Count; i++)
             {
@@ -12629,6 +13566,10 @@ public class Ocgcore : ServantWithCardDescription
             Program.I().book.clear();
             Program.I().book.hide();
         }
+        // 🔑 「极大怪兽一体化」：对局收尾 / 换备 / 撤回重开都走这里 ⇒ 先把三件的表现层位移
+        //   收干净（回各自 accurate_position 一次），否则残留的放大位移会带进下一局。
+        //   非 RD / 没在放大时内部是空操作。
+        rdMaxIntegratedReset();
         for (int i = 0; i < cards.Count; i++)
         {
             cards[i].hide();

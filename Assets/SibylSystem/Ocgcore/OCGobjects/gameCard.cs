@@ -580,6 +580,81 @@ public class gameCard : OCGobject
     }
 
     /// <summary>
+    /// 这张卡现在是不是 **excited（悬停放大）态**。只读，给 Ocgcore 的「极大怪兽一体化」
+    /// 仲裁用（判「本体自己的 ES 退出逻辑会不会来抢按钮」）。
+    /// </summary>
+    public bool ES_isExcited
+    {
+        get { return ES_excited_unsafe_should_not_be_changed_dont_touch_this; }
+    }
+
+    /// <summary>
+    /// 光标是否正指着这张卡（<see cref="ES_mouse_check"/> 的公开包装）—— 与卡自己的 ES 状态无关，
+    /// 只是「有没有被指向」这一个几何事实。给「极大怪兽一体化」判「三件里有没有任一张被指向」用。
+    /// </summary>
+    public bool ES_hoveredByPointer()
+    {
+        return ES_mouse_check();
+    }
+
+    /// <summary>
+    /// **「极大状态下的本体」的悬停白框**同步（用户 2026-09-25 第 1 条：极大状态下只有
+    /// L/R 部件有白框、中间那张本体没有）。每帧调一次（`RefreshFunction_ES` 末尾），
+    /// 进入 excited 那一帧也会调（`ES_enter_excited`）—— 两处都要，理由见下。
+    ///
+    /// 为什么必须**每帧**同步、不能只在「进 excited」那一帧点一次：这条白框的第二个来源是
+    /// 「本侧三件正被『极大怪兽一体化』一起放大」（= 光标悬停在 L/R 部件上）。那种情况下
+    /// **本体自己没有进 excited**（`ES_enter_excited` 根本不会被调）⇒ 只在进入帧点一次
+    /// 就永远亮不起来。反过来，光标移开时也必须能灭 —— 统一在这里按同一个判据同步。
+    ///
+    /// 判据（全在 <see cref="Ocgcore.RdMaxBodyFrameFlash"/> 里）：
+    ///   · RD + 这张卡是极大怪兽 + **本体**（带怪兽区位、不带 Overlay 位）；
+    ///   · 本侧**三件齐**（= 真的处于极大状态）—— 单独在场的极大怪兽**不受影响**
+    ///     （那时它就是普通场上怪兽，原生没有框，一个像素都不该变）；
+    ///   · 且「本体自己被悬停」**或**「本侧一体化正在放大中」。
+    /// ⛔ 熄灭只关**我自己点亮的**那只（<see cref="rdMaxBodyFlashMine"/>）。
+    /// </summary>
+    private void rdMaxBodyFlashSync()
+    {
+        if (!isRdMaximumCard())
+        {
+            return;      // OCG / 非极大卡：一个像素都不动（isRdMaximumCard 自带 IsRD 门）
+        }
+        if ((p.location & (UInt32)CardLocation.MonsterZone) == 0
+            || (p.location & (UInt32)CardLocation.Overlay) != 0)
+        {
+            return;      // 不是「站在场上的本体」（部件 / 手牌 / 已离场）—— 不归这条管
+        }
+        Ocgcore oc = Program.I().ocgcore;
+        if (oc != null && oc.RdMaxBodyFrameFlash((int)p.controller, ES_mouse_check()))
+        {
+            flash_line_on();
+            rdMaxBodyFlashMine = true;
+        }
+        else if (rdMaxBodyFlashMine)
+        {
+            flash_line_off();
+            rdMaxBodyFlashMine = false;
+        }
+    }
+
+    /// <summary>
+    /// 本卡（极大怪兽**本体**）的选项按钮是否正被 Ocgcore 的「极大怪兽一体化」托管。
+    ///
+    /// 托管期间本卡自己的 <see cref="ES_exit_excited"/> **不许**去 hide 按钮 —— 否则
+    /// 「鼠标从 L/R 掠到本体」时本体会先 hide、tick 下一帧再 show，产生闪烁。
+    /// 非 RD / 没开这个选项时**恒 false** ⇒ 退出路径与旧实现逐字节相同（OCG 侧零影响）。
+    /// </summary>
+    public bool rdMaxIntegratedButtonOwned = false;
+
+    /// <summary>
+    /// 「极大状态下本体的悬停白框」是不是**由本逻辑点亮的**（用户 2026-09-25 第 1 条）。
+    /// 只用来决定「该不该由我关掉」—— 免得把别的路径点亮的框误关（本体原本是
+    /// `verticle_clickable` 档、原生不带框，所以字段恒 false 时行为与旧实现逐字节相同）。
+    /// </summary>
+    private bool rdMaxBodyFlashMine = false;
+
+    /// <summary>
     /// 这张卡是不是 RD 极大怪兽（RD 模式 + type bit15 = 0x8000；口径同 Ocgcore.isMaximumCard、
     /// GameStringHelper.typeName）。
     ///
@@ -636,17 +711,53 @@ public class gameCard : OCGobject
     /// </summary>
     public string probe_face_rect()
     {
-        if (gameObject_face == null || Program.camera_game_main == null)
+        return probe_quad_rect(gameObject_face, Vector3.zero);
+    }
+
+    /// <summary>
+    /// 同 <see cref="probe_face_rect"/>，但按「**卡根**在 <paramref name="rootPos"/> 时」算。
+    /// 用于「极大怪兽一体化」放大期间让 `[max]` 探针报**逻辑几何**（见 Ocgcore.logMaximumProbe）：
+    /// 放大只改卡根的 position（不动旋转、不动 scale）⇒ 卡面在那个位置上的矩形
+    /// = 实际矩形整体平移 `rootPos - 实际根位置`。传入实际根位置时与
+    /// <see cref="probe_face_rect"/> 逐字节相同。
+    /// </summary>
+    public string probe_face_rect_at(Vector3 rootPos)
+    {
+        return probe_quad_rect(gameObject_face, rootPos - gameObject.transform.position);
+    }
+
+    /// <summary>排查用：**竖立绘**画在屏幕上的矩形（客户区、左上原点，同 probe_face_rect 口径）。
+    /// 这张卡没挂立绘时返回 "none"。</summary>
+    public string probe_verticle_rect()
+    {
+        return probe_quad_rect(game_object_verticle_drawing, Vector3.zero);
+    }
+
+    /// <summary>同 <see cref="probe_verticle_rect"/>，但按「卡根回到 <see cref="accurate_position"/>
+    /// 时」算 —— 立绘的世界位置是 `get_verticle_drawing_vector(卡面位置)`（= 卡面位置 + 常量偏移），
+    /// 世界旋转/缩放与卡根的**平移**无关 ⇒ 立绘的逻辑矩形 = 实际矩形整体平移同一段位移。
+    /// 一体放大期间拿它当分母，`vert / vertbase` 的宽比就该 ≈ m（立绘跟着卡面一起放大）。</summary>
+    public string probe_verticle_rect_base()
+    {
+        return probe_quad_rect(game_object_verticle_drawing,
+            accurate_position - gameObject.transform.position);
+    }
+
+    /// <summary>把一个 Quad(1x1) 对象的四个角投影成屏幕包围盒（客户区、左上原点）。
+    /// <paramref name="shift"/> 是「按逻辑位置算」时给所有角点加的位移（见上面 _at / _base 两个入口）。</summary>
+    private string probe_quad_rect(GameObject go, Vector3 shift)
+    {
+        if (go == null || Program.camera_game_main == null)
         {
             return "none";
         }
-        Transform f = gameObject_face.transform;
+        Transform f = go.transform;
         float x0 = float.MaxValue, x1 = float.MinValue, y0 = float.MaxValue, y1 = float.MinValue;
         for (int i = 0; i < 4; i++)
         {
             Vector3 local = new Vector3((i & 1) == 0 ? -0.5f : 0.5f,
                                         (i & 2) == 0 ? -0.5f : 0.5f, 0f);
-            Vector3 sp = Program.camera_game_main.WorldToScreenPoint(f.TransformPoint(local));
+            Vector3 sp = Program.camera_game_main.WorldToScreenPoint(f.TransformPoint(local) + shift);
             x0 = Math.Min(x0, sp.x); x1 = Math.Max(x1, sp.x);
             y0 = Math.Min(y0, sp.y); y1 = Math.Max(y1, sp.y);
         }
@@ -733,9 +844,20 @@ public class gameCard : OCGobject
         //   既不是可选对象、也不该被「确认」（用户 2026-09-22：别再让玩家确认这两张）。
         //   悬停看效果不受影响 —— 那条路走 ES_enter_excited → showMeLeft，不经过这里。
         //   （本处是 ES_cardClicked 在全局唯一的调用点，在这里拦下就再无入口。）
-        if (Program.InputGetMouseButtonUp_0 && ES_mouse_check() && !isRdMaximumPiece())
+        // 🔑 2026-09-25「极大怪兽一体化」（设置项 rdMaxIntegrated_，仅 RD、默认开）：点 L/R
+        //   部件**等效点中间件** —— 目标交给 Ocgcore.RdMaximumClickTarget 解析：
+        //     非部件（含普通卡、本体自己）⇒ 原样返回 `this`（**旧行为逐字节不变**）；
+        //     部件 / 召唤中间态 ⇒ 返回它的本体（严格版口径）；
+        //     孤儿部件（本体已不在）⇒ 返回 null ⇒ 这里不发包；
+        //     选项关掉 ⇒ 部件返回 null（退回今天「点部件没反应」）。
+        //   发动 / 攻击仍由**本体**发出 ⇒ 服务器天然保证不能反复发动 / 反复攻击。
+        if (Program.InputGetMouseButtonUp_0 && ES_mouse_check())
         {
-            Program.I().ocgcore.ES_cardClicked(this);
+            gameCard target = Program.I().ocgcore.RdMaximumClickTarget(this);
+            if (target != null)
+            {
+                Program.I().ocgcore.ES_cardClicked(target);
+            }
         }
 
         if (ES_excited_unsafe_should_not_be_changed_dont_touch_this)
@@ -772,6 +894,12 @@ public class gameCard : OCGobject
                 //无作为
             }
         }
+        // 🔑 「极大状态下的本体」悬停白框的**每帧**同步（用户 2026-09-25 第 1 条）——
+        //   理由见 rdMaxBodyFlashSync 的注释（第二个来源「悬停 L/R 时一体化放大」不走
+        //   ES_enter_excited，只在进入帧点一次就亮不起来）。
+        //   放在**函数最后**：上面两条路（进 excited / 保持 excited / 退出）都已跑完，
+        //   本帧的 ES 状态已定。非 RD / 非极大 / 非本体在方法内部立刻早退 ⇒ OCG 侧零开销。
+        rdMaxBodyFlashSync();
     }
 
     private void ES_excited_handler()
@@ -809,6 +937,17 @@ public class gameCard : OCGobject
 
     private void ES_excited_handler_close_up_handler()
     {
+        // 🔑 「极大怪兽一体化」占用位置期间：本卡（三件之一）**不再自己 close-up** ——
+        //   三张的「拉近」由 Ocgcore.rdMaxIntegratedTick 统一按「共同 m、以本体屏点为轴」做，
+        //   两边都写就会互相抢位置（表现为悬浮时高度抖动）。
+        //   ⚠ 早退只跳过**位置**：立绘的跟随与尺寸在 refreshFunctions 的
+        //   card_verticle_drawing_handler 里每帧照跑（见 UA_give_condition 里那段 Add），
+        //   所以立绘不会因为这里早退而掉队。
+        //   条件恒 false 时（非 RD / 选项关 / 三件没齐 / k==0）行为与旧实现逐字节相同。
+        if (Program.I().ocgcore.RdMaxIntegratedOwnsPosition(this))
+        {
+            return;
+        }
         Vector3 screenposition = Program.camera_game_main.WorldToScreenPoint(accurate_position);
         Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - 10));
         gameObject.transform.position += (worldposition - gameObject.transform.position) * 35f * Program.deltaTime;
@@ -931,6 +1070,20 @@ public class gameCard : OCGobject
                 iTween.RotateTo(gameObject, new Vector3(Program.tableauAngle(-30f), 0, 0), 0.3f);
             }
         }
+        else if (condition == gameCardCondition.verticle_clickable)
+        {
+            // 🔑 「极大状态下的本体也要有悬停白框」（用户 2026-09-25 第 1 条）：
+            //   极大状态下场上是**三张**卡（本体 + L/R 部件），但两边的框不一致 ——
+            //   L/R 部件走 floating_clickable（上面那支）会 flash_line_on()，而**本体**
+            //   走的是「场上表侧怪兽」档 verticle_clickable，**原生不带白框**
+            //   ⇒ 用户看到的「只有左右部件有白框」。
+            //   ⛔ 不能在这里无脑 flash_line_on()：那会把 **OCG/普通场上怪兽**也点亮
+            //      （原生行为里它们本就没有框）。条件收紧到「RD + 极大本体 + 本侧三件齐」，
+            //      即只有**处于极大状态**的极大怪兽才有 —— 单独在场的极大怪兽不受影响。
+            //   条件与实际点亮都在 rdMaxBodyFlashSync() 里（它每帧还要再同步一次，
+            //   理由见那个方法）。
+            rdMaxBodyFlashSync();
+        }
         ES_excited_unsafe_should_not_be_changed_dont_touch_this = true;
         showMeLeft(true);
 
@@ -972,21 +1125,38 @@ public class gameCard : OCGobject
         iTween[] iTweens = gameObject.GetComponents<iTween>();
         for (int i = 0; i < iTweens.Length; i++) MonoBehaviour.DestroyImmediate(iTweens[i]);
         flash_line_off();
+        // 「极大状态下的本体白框」也是本卡自己点亮的（rdMaxBodyFlashSync），退出时一并记账 ——
+        // 下一次同步（RefreshFunction_ES 末尾每帧跑）会按当前判据重新点亮或保持熄灭。
+        rdMaxBodyFlashMine = false;
         ES_excited_unsafe_should_not_be_changed_dont_touch_this = false;
-        for (int i = 0; i < buttons.Count; i++)
+        // 🔑 「极大怪兽一体化」托管期间按钮由 Ocgcore 的每帧仲裁管（它每帧都会重新 show），
+        //   本卡自己**不许**在这里 hide —— 否则「鼠标从 L/R 掠到本体」的当帧会先 hide、
+        //   下一帧 tick 再 show，看得见一次闪烁。夺回权（owned=false）时是 tick 自己 hide 的。
+        if (!rdMaxIntegratedButtonOwned)
         {
-            buttons[i].hide();
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                buttons[i].hide();
+            }
         }
         destroy(gameObject_event_card_bed);
-        if (move_to_original_place)
+        // 🔑 同理：位置正被「一体放大」占用时**跳过回位补间** —— 否则「光标在卡缝上掠过
+        //   一帧」会起一条朝 accurate_position 的 TweenTo，与本 tick 每帧写的位置抢，
+        //   产生约 0.3s 的抖动（放大期间本体也会因为光标扫过 L/R 而退出 excited）。
+        if (move_to_original_place && !Program.I().ocgcore.RdMaxIntegratedOwnsPosition(this))
         {
             ES_safe_card_move_to_original_place();
         }
-        List<gameCard> overlayed_cards = Program.I().ocgcore.GCS_cardGetOverlayElements(this);
-        for (int x = 0; x < overlayed_cards.Count; x++)
+        // 素材「收回去」那一段同理：极大怪兽本体的 overlay 元素**就是**两张 L/R 部件，
+        //   托管期间把它们 tween 回原位会跟一体放大抢（放大期间光标扫过本体就会走到这里）。
+        if (!Program.I().ocgcore.RdMaxIntegratedOwnsPosition(this))
         {
-            overlayed_cards[x].ES_safe_card_move_to_original_place();
-            overlayed_cards[x].flash_line_off();
+            List<gameCard> overlayed_cards = Program.I().ocgcore.GCS_cardGetOverlayElements(this);
+            for (int x = 0; x < overlayed_cards.Count; x++)
+            {
+                overlayed_cards[x].ES_safe_card_move_to_original_place();
+                overlayed_cards[x].flash_line_off();
+            }
         }
         MonoBehaviour.Destroy(gameObject.AddComponent<card_locker>(), 0.3f);
     }
@@ -2246,6 +2416,36 @@ public class gameCard : OCGobject
     public List<gameButton> allButtons
     {
         get { return buttons; }
+    }
+
+    /// <summary>
+    /// 「极大怪兽一体化」托管期间，由 <c>Ocgcore.rdMaxIntegratedTick</c> **每帧**调用：
+    /// 按本体自己的档位把选项按钮摆出来（只有带立绘的**本体**有按钮 —— 部件没有，别去建）。
+    ///
+    /// 为什么要「每帧重摆」而不是「摆一次置个状态」：`clearResponse()` 的
+    /// `remove_all_cookie_button()` 会把按钮抹掉，而 `gameButton.show()` 在
+    /// `gameObject == null` 时会重建 ⇒ 每帧调一次就自愈了，被抹掉的下一帧回来。
+    /// 末状态由 tick 的仲裁决定（`rdMaxIntegratedButtonOwned`），本方法只负责「摆」。
+    /// </summary>
+    public void ES_showButtonsForRdMaxIntegrated()
+    {
+        if (condition == gameCardCondition.verticle_clickable)
+        {
+            ES_excited_handler_button_shower();
+        }
+    }
+
+    /// <summary>解除托管时把本体的按钮收掉（等价于 <see cref="ES_exit_excited"/> 里那一段，
+    /// 但**不动** ES 状态、也不碰位置）—— 由 tick 在「夺回权」的那一帧调。</summary>
+    public void ES_hideButtonsForRdMaxIntegrated()
+    {
+        for (int i = 0; i < buttons.Count; i++)
+        {
+            if (buttons[i] != null && buttons[i].gameObject != null)
+            {
+                buttons[i].hide();
+            }
+        }
     }
 
     public void add_one_button(gameButton b)    

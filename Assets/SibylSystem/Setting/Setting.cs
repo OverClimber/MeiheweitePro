@@ -84,6 +84,12 @@ public class Setting : WindowServant2D
         CreateTopDownToggle();
         CreateAskMSetToggle();
         CreateAskSummonToggle();
+        // 「极大怪兽一体化」放在**最后**：它是 RD 独占行，排末尾才不会改动上面几行的 slot
+        //（插中间会把 askMset_/askSummon_ 的行位整体下移，属无谓扰动）。
+        CreateRdMaxIntegratedToggle();
+        // 建行时每行各自同步过一次；这里再走一遍是把「模式已知」与「窗口已就位」两件事
+        // 收口到同一个出口（幂等：显隐/行位/高度三者的算式都不依赖调用次数）。
+        SyncExtraRowVisibility();
         SyncRdBadges();
     }
 
@@ -313,6 +319,132 @@ public class Setting : WindowServant2D
         return rowName;
     }
 
+    /// <summary>
+    /// 追加行 → 这一行是不是**只该在 RD 模式出现**。
+    ///
+    /// 加这个机制之前没有它：<c>rdSpecific</c> 只决定「挂不挂 RD 角标」，行本身两种模式都常显
+    /// （见 askMset_ / askSummon_）。而「极大怪兽一体化」只在 RD 里有意义（OCG 没有极大怪兽），
+    /// 所以要真的把行藏起来。
+    /// ⛔ 隐藏/点亮都必须走 <see cref="extraRowObjects"/> 的直接引用 —— `UIHelper.getByName`
+    ///   会**跳过未激活对象**，本项目真踩过这个坑（见 extraRowObjects 的注释）。
+    /// </summary>
+    private readonly System.Collections.Generic.HashSet<string> extraRowRdOnly
+        = new System.Collections.Generic.HashSet<string>();
+
+    /// <summary>
+    /// 克隆来源（prefab 原生的 spyer_）那一行的 localPosition —— 追加行的**基准 y**。
+    /// 建第一行时记下来：藏掉某一行之后要**重排可见行**（把空档收掉），而这一步不该再去查
+    /// spyer_（`getByName` 会跳过未激活对象，本项目在这上面栽过）；缓存一次最稳。
+    /// </summary>
+    private Vector3 extraRowSrcLocalPos = Vector3.zero;
+    private bool extraRowSrcPosSaved = false;
+
+    /// <summary>这一行此刻该不该显示（RD 独占行在 OCG 下不显示，其余恒显示）。</summary>
+    private bool ExtraRowVisible(string rowName)
+    {
+        if (extraRowRdOnly.Contains(rowName))
+        {
+            return GameModeManager.IsRD;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// 当前**可见**的追加行数 —— 窗口高度只按它长（见 <see cref="GrowWindowForExtraRows"/>）。
+    ///
+    /// ⛔ 为什么不能用 <c>extraToggleRows</c>（＝建过的行数）：既有验收脚本把「行数」当判据
+    ///   （`_verify_askconfirm.py` 的 `rows == 3` / `bg == 524 + 24×rows` / `winY == -12×rows`），
+    ///   而 RD 独占行在 OCG 下是藏起来的、不该占高度。改成可见行数后，OCG 侧依旧是
+    ///   `rows=3 / bg=596 / winY=-36` —— 与加这一行之前**逐字段相同**；只有 RD 才是 4。
+    /// </summary>
+    private int VisibleRowCount()
+    {
+        int n = 0;
+        for (int i = 0; i < extraToggleRowNames.Count; i++)
+        {
+            if (ExtraRowVisible(extraToggleRowNames[i]))
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// 按当前模式同步追加行的**显隐 + 行位**，再让窗口跟着长高/收回。
+    ///
+    /// 两件事必须一起做：
+    ///   ① 显隐：RD 独占行只在 RD 出现；
+    ///   ② **重排可见行**：行 y 是建行时按 slot 写死的（见 AddExtraToggleRow），藏掉一行会留一个
+    ///      24px 的空档、窗口还会照旧偏高。这里按创建顺序只对**可见**行重新编号 ——
+    ///      第 1 行 = spyer_ 的下一行（基准 y − 24），第 n 行 = 基准 y − 24×n。
+    ///      于是 OCG 下的行位与加这一行之前完全一致，RD 下则是 4 行连续排下来。
+    ///
+    /// 调用点：每建完一行（AddExtraToggleRow 末尾）、initialize 末尾、模式切换
+    /// （OnGameModeChanged）—— 三处都要求「先同步显隐、再算窗口高度」，否则会拿旧行数去长窗口。
+    /// </summary>
+    private void SyncExtraRowVisibility()
+    {
+        bool rd = GameModeManager.IsRD;
+        int slot = 0;
+        for (int i = 0; i < extraToggleRowNames.Count; i++)
+        {
+            string name = extraToggleRowNames[i];
+            GameObject go;
+            if (!extraRowObjects.TryGetValue(name, out go) || go == null)
+            {
+                continue;
+            }
+            bool show = !extraRowRdOnly.Contains(name) || rd;
+            if (go.activeSelf != show)
+            {
+                go.SetActive(show);
+            }
+            if (!show)
+            {
+                continue;
+            }
+            slot++;
+            if (extraRowSrcPosSaved)
+            {
+                // 只改 y（x/z 沿用克隆时与 spyer_ 同列的值）。
+                Vector3 lp = go.transform.localPosition;
+                lp.y = extraRowSrcLocalPos.y - 24f * slot;
+                go.transform.localPosition = lp;
+            }
+        }
+        if (QuickTestTrace.Enabled)
+        {
+            // 排查用：可见行数 / 总行数 / 隐藏了几行。字段名刻意避开 `rdOnly `（带空格）——
+            // 历史验收脚本用 `lines_of(..., "rdOnly ")` 断言「按模式藏行的机制已删干净」，
+            // 那是**旧策略**的判据（旧行 rdPileSame_ 连同机制一起删过），本功能的验收会把它
+            // 改成正面判据；这里不制造歧义。
+            QuickTestTrace.Log("setting", "rdRows visible=" + VisibleRowCount() + "/"
+                + extraToggleRowNames.Count + " mode=" + GameModeManager.ModeLabel
+                + " hidden=" + (extraToggleRowNames.Count - VisibleRowCount()));
+        }
+        GrowWindowForExtraRows();
+    }
+
+    /// <summary>
+    /// 「极大怪兽一体化」开关（**只在 RD 模式出现**、默认开）。开启后：
+    ///   ① 极大状态（三件齐）的极大怪兽被鼠标悬浮时，三件 **＋ 极大立绘视为一体**一起放大，
+    ///      不再各自单独放大；**单独在场**的极大怪兽（未组成极大）不受影响；
+    ///   ② 点 L/R 部件等效于点中间件 —— 卡面点击转发给本体，且悬浮 L/R 时把本体的
+    ///      「发动效果 / 攻击宣言」按钮浮出来。发动/攻击依旧记在本体上（服务器天然保证
+    ///      不能反复发动 / 反复攻击）；
+    ///   ③ 左侧显示栏不变（仍是「你悬浮的那张部件」自己的资料）。
+    ///
+    /// 键是**全局固定键**（不分 RD/OCG）：这一行本来就只有 RD 能看见、能改，没必要再分键。
+    /// 消费方（<c>Ocgcore.rdMaxIntegratedTick</c> / <c>Ocgcore.RdMaximumClickTarget</c>）
+    /// **每帧实时读 Config**，不缓存、不挂 onChange —— 与 askMset_ 那条同一口径。
+    /// </summary>
+    private void CreateRdMaxIntegratedToggle()
+    {
+        AddExtraToggleRow("rdMaxIntegrated_", "极大怪兽一体化", () => "rdMaxIntegrated_", "1",
+            rdSpecific: true, rdOnly: true);
+    }
+
     /// <summary>模式切换钩子只挂一次（initialize 可能被反复调用）。</summary>
     private bool modeHookInstalled = false;
 
@@ -332,6 +464,10 @@ public class Setting : WindowServant2D
 
     private void OnGameModeChanged(GameModeManager.Mode mode)
     {
+        // 顺序：先按新模式同步**显隐与行位**（RD 独占行要出场 / 退场），再按新模式重读各行取值。
+        // ⚠ 不能反：RefreshExtraToggleRows 末尾会刷 RD 角标，而角标语义是「这一行现在读哪一份
+        //   存档」—— 「这一行此刻在不在窗口里」必须先定下来，否则会刷出一帧对不上的角标状态。
+        SyncExtraRowVisibility();
         RefreshExtraToggleRows();
     }
 
@@ -386,14 +522,24 @@ public class Setting : WindowServant2D
     ///
     /// <paramref name="rdSpecific"/> = 这一行是不是**RD 专项**（按模式分键、RD 有自己一份存档）。
     /// true 时行尾挂一枚 RD 角标，随模式亮灭（见 <see cref="SyncRdBadges"/>）；OCG 通用开关传 false。
+    ///
+    /// <paramref name="rdOnly"/> = 这一行是不是**只在 RD 模式出现**（OCG 下整行藏起来，
+    /// 见 <see cref="SyncExtraRowVisibility"/>）。默认 false = 两种模式都常显。
+    /// ⚠ 与 rdSpecific 是**两件事**：rdSpecific 只管角标、不管显隐；要「只在 RD 出现」必须用 rdOnly。
     /// </summary>
     private UIToggle AddExtraToggleRow(string rowName, string label, System.Func<string> keyOf, string configDefault,
-        bool rdSpecific = false)
+        bool rdSpecific = false, bool rdOnly = false)
     {
         UIToggle src = UIHelper.getByName<UIToggle>(gameObject, "spyer_");
         if (src == null || UIHelper.getByName<UIToggle>(gameObject, rowName) != null)
         {
             return null;
+        }
+        if (!extraRowSrcPosSaved)
+        {
+            // 基准 y 只记一次：重排可见行（SyncExtraRowVisibility）要用它，之后不该再去查 spyer_。
+            extraRowSrcLocalPos = src.transform.localPosition;
+            extraRowSrcPosSaved = true;
         }
         int slot = extraToggleRows;
         GameObject clone = UnityEngine.Object.Instantiate(src.gameObject);
@@ -424,12 +570,18 @@ public class Setting : WindowServant2D
         extraToggleRowNames.Add(rowName);
         extraRowKeyOf[rowName] = keyOf;
         extraRowDefault[rowName] = configDefault;
+        if (rdOnly)
+        {
+            extraRowRdOnly.Add(rowName);
+        }
         // 记下**直接引用**（行本体 + toggle）：刷值 / 报几何都走这两个表（详见 extraRowObjects）。
         extraRowObjects[rowName] = clone;
         extraRowToggles[rowName] = toggle;
-        // 记完这一行，窗口高度立刻跟着长一行。
+        // 记完这一行：先按模式同步显隐与行位，再由它把窗口高度长到位。
+        // ⛔ 顺序不能反 —— 高度是按**可见行数**算的（GrowWindowForExtraRows → VisibleRowCount），
+        //   先长窗口就会拿「这一行还没参与显隐裁决」的旧行数去算。
         InstallModeHook();
-        GrowWindowForExtraRows();
+        SyncExtraRowVisibility();
         if (QuickTestTrace.Enabled)
         {
             // 与 SelectServer.LogAnchor 同款：设置窗口挂在 camera_main_2d 下，
@@ -475,7 +627,10 @@ public class Setting : WindowServant2D
             return;
         }
         const int baseHeight = 524;      // prefab 原值
-        int target = baseHeight + 24 * extraToggleRows;
+        // ⛔ 按**可见行数**长（不是 extraToggleRows = 建过的行数）：RD 独占行在 OCG 下是藏起来的、
+        //   不该占高度。这样 OCG 侧恒为 rows=3 / bg=596 / winY=-36，与加这一行之前逐字段相同。
+        int visibleRows = VisibleRowCount();
+        int target = baseHeight + 24 * visibleRows;
         int delta = target - bg.height;
         if (delta == 0)
         {
@@ -507,7 +662,7 @@ public class Setting : WindowServant2D
             float bottomY = -bg.height * 0.5f;
             float topRoot = mainWindowT.localPosition.y + bg.height * 0.5f;
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
-            sb.Append("grow rows=").Append(extraToggleRows)
+            sb.Append("grow rows=").Append(visibleRows)
               .Append(" bg=").Append(bg.height)
               .Append(" box=").Append(box != null ? box.size.y.ToString("F0") : "null")
               .Append(" winY=").Append(mainWindowT.localPosition.y.ToString("F1"))
@@ -516,6 +671,12 @@ public class Setting : WindowServant2D
             for (int i = -1; i < extraToggleRowNames.Count; i++)
             {
                 string n = i < 0 ? "spyer_" : extraToggleRowNames[i];
+                if (i >= 0 && !ExtraRowVisible(n))
+                {
+                    // 藏起来的行（OCG 下的 RD 独占行）不报几何：它在窗口里不存在，
+                    // 报了会顶掉「留白咬清单最后一行」那条判据（S6 咬的是可见行的末行）。
+                    continue;
+                }
                 // 追加行走直接引用（理由见 extraRowObjects）；spyer_ 是 prefab 原生行、不在追加表里。
                 GameObject go = i < 0 ? UIHelper.getByName(gameObject, n) : FindExtraRow(n);
                 Transform t = go != null ? go.transform : null;
@@ -768,11 +929,14 @@ public class Setting : WindowServant2D
         Config.Set("maximize_", UIHelper.fromBoolToString(UIHelper.isMaximized()));
         for (int i = 0; i < extraToggleRowNames.Count; i++)
         {
-            UIToggle t = UIHelper.getByName<UIToggle>(gameObject, extraToggleRowNames[i]);
-            if (t != null)
+            // ⚠ 必须走**直接引用**（extraRowToggles）：隐藏中的行（OCG 下的 RD 独占行）用
+            //   getByName 会被整个跳过 ⇒ 这一项再也存不进盘（理由见 extraRowObjects 的注释）。
+            UIToggle t;
+            if (!extraRowToggles.TryGetValue(extraToggleRowNames[i], out t) || t == null)
             {
-                Config.Set(ExtraRowKey(extraToggleRowNames[i]), UIHelper.fromBoolToString(t.value));
+                continue;
             }
+            Config.Set(ExtraRowKey(extraToggleRowNames[i]), UIHelper.fromBoolToString(t.value));
         }
     }
 
@@ -795,17 +959,20 @@ public class Setting : WindowServant2D
         // 是实时读 Config 的，只靠 saveWhenQuit 的话运行中永远读不到。
         for (int i = 0; i < extraToggleRowNames.Count; i++)
         {
-            UIToggle t = UIHelper.getByName<UIToggle>(gameObject, extraToggleRowNames[i]);
-            if (t != null)
+            // ⚠ 同上：走**直接引用**，隐藏中的行不能被 getByName 跳过
+            //   （否则「改一下即存」这一档对它失效，只能等退出时才落盘）。
+            UIToggle t;
+            if (!extraRowToggles.TryGetValue(extraToggleRowNames[i], out t) || t == null)
             {
-                // 落盘的键按模式解析：RD 的那两行写自己的键，OCG 的两行走历史键。
-                Config.Set(ExtraRowKey(extraToggleRowNames[i]), UIHelper.fromBoolToString(t.value));
-                if (trace != null)
-                {
-                    trace.Append(' ').Append(extraToggleRowNames[i])
-                        .Append("@").Append(ExtraRowKey(extraToggleRowNames[i]))
-                        .Append('=').Append(t.value);
-                }
+                continue;
+            }
+            // 落盘的键按模式解析：RD 的那两行写自己的键，OCG 的两行走历史键。
+            Config.Set(ExtraRowKey(extraToggleRowNames[i]), UIHelper.fromBoolToString(t.value));
+            if (trace != null)
+            {
+                trace.Append(' ').Append(extraToggleRowNames[i])
+                    .Append("@").Append(ExtraRowKey(extraToggleRowNames[i]))
+                    .Append('=').Append(t.value);
             }
         }
         if (trace != null)
