@@ -70,8 +70,8 @@ CDBS = [
     ("RD异画卡.ypk", "RD Alternate.cdb", "rd_alternate.cdb"),
 ]
 
-LFLIST_ZIP = "2026.7 禁限表RD补丁+使用说明 (2).zip"
-LFLIST_MEMBER = "2026.7 RD 禁卡表补丁+使用说明/lflist.conf"
+LFLIST_ZIP = "2026.10禁限传说卡表补丁+使用说明.zip"
+LFLIST_MEMBER = "传说表补丁+使用说明/lflist.conf"
 
 CLOSEUP_ZIP = "【Pro2专用】RD立绘补丁.zip"
 
@@ -153,7 +153,7 @@ SRC_FINGERPRINT = {
     "RD正式卡.ypk": (678666934, "baa0cc89a9ad9824b212b071141941d4"),
     "RD先行卡 (15).ypk": (30899139, "a580c7fc294f5ffff44ff9c9a675476e"),
     "RD异画卡.ypk": (19068646, "ab95130d250bba405fc85ee463197469"),
-    LFLIST_ZIP: (3702, "e6300e1e1c666d01f7e47e6f31ba2b30"),
+    LFLIST_ZIP: (3668, "ad2794afb724321c082d6d52bf49a842"),
     CLOSEUP_ZIP: (78648770, "400dfe50afcd9c9f1433bbf5dedc9721"),
     CLIENT_ZIP: (840169284, "5a5963f84731cb17be244e0374f25693"),
 }

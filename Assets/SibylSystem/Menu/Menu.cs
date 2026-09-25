@@ -12,8 +12,14 @@ using UnityEngine.Networking;
 
 public class Menu : WindowServantSP
 {
-    /// <summary>主菜单版本号文本；version_ 标签平时显示它，检查/下载数据时临时让位给进度。</summary>
-    private const string VersionBaseText = "MeiheweitePro v2.4.d 1036.2";
+    /// <summary>主菜单版本号文本；version_ 标签平时显示它，检查/下载数据时临时让位给进度。
+    ///
+    /// 口径（用户 2026-09-25 定稿）：**只显示本产品版本**（v1.3），不再对外显示上游协议号
+    /// （原「v2.4.d 1036.2」）。已核实该上游串只是显示文案（全工程仅 3 处 UI 赋值），
+    /// 真正送服务器的协议版本走 <c>Config.ClientVersion</c>（MyCard.cs 里十六进制编码），
+    /// 二者无关 ⇒ 改这里不影响联机兼容。
+    /// 版本号常量在 <see cref="ClientSelfUpdate.ClientVersionText"/>，这里是显示文案。</summary>
+    private const string VersionBaseText = "MeiheweitePro v" + ClientSelfUpdate.ClientVersionText;
 
     /// <summary>主菜单 version_ 标签，运行时从 prefab 取；兼作在线数据更新的状态显示。</summary>
     private UILabel _versionLabel = null;
@@ -239,7 +245,18 @@ public class Menu : WindowServantSP
         UIHelper.registEvent(gameObject, "supreCards_", onClickUpdateResources);
         // RD 专属「资源更新」的回调在 CreateRdUpdateMenuItem 里就地挂（OCG 下该行
         // 已被 SetActive(false)，registEvent 的 getByName 只搜激活对象、永远找不到它）。
+
+        // 客户端本体版本检查（v1.3）：**每次进程只静默查一次**（initialize 会因返回主菜单重跑）。
+        // 用静态标志挡重复；失败静默（不影响游戏），有新版才发一次提示（ClientSelfUpdate 内部按版本去重）。
+        if (!_clientUpdateChecked)
+        {
+            _clientUpdateChecked = true;
+            ClientSelfUpdate.CheckAsync(true);
+        }
     }
+
+    /// <summary>本次进程是否已发起过客户端更新检查（initialize 会被重复调用）。</summary>
+    private static bool _clientUpdateChecked = false;
 
     // ============================ 主菜单视觉规格 ============================
     // 一律以 YGOPro2（PC 原生）的 Assets/transUI/prefab/trans_menu.prefab 为准：
@@ -480,7 +497,7 @@ public class Menu : WindowServantSP
 
         // 版本号恢复 YGOPro2 的原位与缩放（面板顶部居中偏右、整体缩小到 0.87）。
         // 文字也在这里换成本产品名（prefab 会被运行时覆盖，别改 prefab 里的 mText）；
-        // v2.4.d / 1036.2 是上游协议版本，留着方便对服务器兼容性。
+        // 版本号只显示本产品版本 v1.3（上游协议号走 Config.ClientVersion，不在此暴露）。
         Transform version = root.Find("version_");
         if (version != null)
         {
@@ -1098,6 +1115,79 @@ public class Menu : WindowServantSP
         Application.OpenURL(SponsorUrl);
         BringSponsorPageToFront();
     }
+
+    /// <summary>「客户端更新」检查发现新版 / 玩家点「打开下载页」时调：把下载页窗口拉到前台。
+    /// 与「支持作者」同一套前台逻辑（见 <see cref="BringSponsorPageToFrontCoroutine"/>），
+    /// 只是匹配词换成网盘相关（夸克 / quark）。由 ClientSelfUpdate.OpenDownloadPage 调用。</summary>
+    public void BringDownloadPageToFront()
+    {
+        Program.I().StartCoroutine(BringDownloadPageToFrontCoroutine());
+    }
+
+    private System.Collections.IEnumerator BringDownloadPageToFrontCoroutine()
+    {
+        float deadline = Time.realtimeSinceStartup + SponsorForegroundTimeout;
+        System.IntPtr found = System.IntPtr.Zero;
+        string foundTitle = null;
+        int scanned = 0;
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            scanned++;
+            found = FindDownloadPageWindow(out foundTitle);
+            if (found != System.IntPtr.Zero)
+            {
+                break;
+            }
+            yield return new WaitForSeconds(0.25f);
+        }
+        if (found == System.IntPtr.Zero)
+        {
+            QuickTestTrace.Log("clientupdate", "fg miss polls=" + scanned);
+            yield break;
+        }
+        if (IsIconic(found))
+        {
+            ShowWindow(found, SponsorSWRestore);
+        }
+        SetForegroundWindow(found);
+        yield return new WaitForSeconds(0.5f);
+        System.IntPtr fg = GetForegroundWindow();
+        System.Text.StringBuilder fgsb = new System.Text.StringBuilder(256);
+        GetWindowText(fg, fgsb, 256);
+        QuickTestTrace.Log("clientupdate",
+            "fg verify " + (fg == found ? "ok" : "fail") + " title=" + fgsb.ToString());
+    }
+
+    /// <summary>枚举顶层可见窗口，取第一个标题含「夸克 / quark / pan.quark」的（下载页）。</summary>
+    private System.IntPtr FindDownloadPageWindow(out string matchedTitle)
+    {
+        downloadFoundWindows.Clear();
+        downloadMatchedTitle = null;
+        EnumWindows(delegate (System.IntPtr h, System.IntPtr _)
+        {
+            if (!IsWindowVisible(h))
+            {
+                return true;
+            }
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(512);
+            GetWindowText(h, sb, 512);
+            string t = sb.ToString();
+            string low = t.ToLowerInvariant();
+            if (low.Contains("quark") || t.Contains("夸克") || low.Contains("pan.quark"))
+            {
+                downloadFoundWindows.Add(h);
+                downloadMatchedTitle = t;
+                return false;
+            }
+            return true;
+        }, System.IntPtr.Zero);
+        matchedTitle = downloadMatchedTitle;
+        return downloadFoundWindows.Count > 0 ? downloadFoundWindows[0] : System.IntPtr.Zero;
+    }
+
+    private string downloadMatchedTitle;
+    private readonly System.Collections.Generic.List<System.IntPtr> downloadFoundWindows
+        = new System.Collections.Generic.List<System.IntPtr>();
 
     // -------- OpenURL 之后把浏览器窗口带到前台（用户 2026-09-24 定稿：「打开网页后要把窗口跳到浏览器」）--------
     //
@@ -2196,6 +2286,8 @@ public class Menu : WindowServantSP
             new messageSystemValue { value = "clientData", hint = "检查并更新卡牌数据" },
             // 忽略本地记录、无条件重下：用于「文件本身合法但不是想要的那份」这类检查发现不了的情况。
             new messageSystemValue { value = "clientDataForce", hint = "强制重下卡牌数据（修复）" },
+            // 客户端本体版本检查（2026-09-25 新增，v1.3）：只查版本 + 指路夸克网盘，不自动下载。
+            new messageSystemValue { value = "clientSelf", hint = "检查客户端更新" },
             new messageSystemValue { value = "cancel", hint = "取消" }
         };
         RMSshow_singleChoice("UPDATE_RESOURCES", options);
@@ -2426,6 +2518,23 @@ public class Menu : WindowServantSP
                 else if (choice == "clientDataForce")
                 {
                     Program.I().StartCoroutine(ClientDataUpdater.UpdateCoroutine(true, true));
+                }
+                else if (choice == "clientSelf")
+                {
+                    // 客户端本体版本检查（v1.3）。检查完由 ClientSelfUpdate 的 Sink 处理；
+                    // 「有新版」时 Sink 已发提示，这里再补一个「打开下载页」入口。
+                    ClientSelfUpdate.CheckAsync(false);
+                    RMSshow_yesOrNo(
+                        "CLIENT_UPDATE_PAGE",
+                        "正在检查客户端更新…\n若稍后提示有新版，可点「是」直接前往下载页\n（夸克网盘：" + ClientSelfUpdate.UpdatePageUrl() + "）",
+                        new messageSystemValue { value = "yes", hint = "打开下载页" },
+                        new messageSystemValue { value = "no", hint = "取消" });
+                }
+                break;
+            case "CLIENT_UPDATE_PAGE":
+                if (result[0].value == "yes")
+                {
+                    ClientSelfUpdate.OpenDownloadPage();
                 }
                 break;
             case "CONFIRM_FORCE_DOWNLOAD_SUPER_PRE": // 确认强制重新下载

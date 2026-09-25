@@ -65,7 +65,7 @@ RD 只有 3 个怪兽区 + 3 个魔陷区，没有灵摆区、没有额外怪兽
 - 只有换机器 / 重新 clone（工程里没有这张图）时才需要跑一次生成脚本。
   当时的效果是**回落成 OCG 那张**（盘面偏宽、牌堆落在最外侧，不会白板、不会崩）。
 
-## 源包清单（2026-09-17 收集，2026-09-19 实测指纹）
+## 源包清单（2026-09-17 收集，2026-09-25 更新禁限表）
 
 源目录：工作区级目录 `参考内容/RD/`（与 `YGOProUnity_V2/` 平级、非 git；`--src` 可指向别处）
 
@@ -74,7 +74,7 @@ RD 只有 3 个怪兽区 + 3 个魔陷区，没有灵摆区、没有额外怪兽
 | `RD正式卡.ypk` | 678666934 | `baa0cc89a9ad9824b212b071141941d4` | 正式卡 3324 张 → `rd_standard.cdb`；卡脚本 2905 个 → `rd/ai/script/`（顺手出卡图） |
 | `RD先行卡 (15).ypk` | 30899139 | `a580c7fc294f5ffff44ff9c9a675476e` | 先行卡 76 张 → `rd_patch.cdb`；卡脚本 66 个 |
 | `RD异画卡.ypk` | 19068646 | `ab95130d250bba405fc85ee463197469` | 异画 84 张 → `rd_alternate.cdb`；卡脚本 83 个（全是 `RD.AlternateCard` 一行，生成期内联） |
-| `2026.7 禁限表RD补丁+使用说明 (2).zip` | 3702 | `e6300e1e1c666d01f7e47e6f31ba2b30` | 包内 `2026.7 RD 禁卡表补丁+使用说明/lflist.conf` → `rd/lflist.conf` |
+| `2026.10禁限传说卡表补丁+使用说明.zip` | 3668 | `ad2794afb724321c082d6d52bf49a842` | 包内 `传说表补丁+使用说明/lflist.conf` → `rd/lflist.conf`（表名 `[2026.10 RD]`，150 条；旧表为 `2026.7 禁限表RD补丁+使用说明 (2).zip`） |
 | `【Pro2专用】RD立绘补丁.zip` | 78648770 | `400dfe50afcd9c9f1433bbf5dedc9721` | 立绘 → `rd/picture/closeup/`（`--all` 才铺） |
 | `电脑版RD客户端.zip` | 840169284 | `5a5963f84731cb17be244e0374f25693` | RD 规则库 22 个 lua + **RD 版 WindBot** + RD `bot.conf` → `rd/ai/`（人机包，见下节） |
 
@@ -191,3 +191,84 @@ python devtools/unpack_rd.py --list          # 只列源包内容，不落盘
 - 注意 `unpack_rd.py` 与 `rd/update/` 互不干扰（脚本只合并铺设白名单路径，
   不会清掉 update 目录）；`rd/ai/cdb/cards.cdb`（人机用）与客户端 cdb 是两份数据，
   包作者要么只发其一、要么两份都发。
+
+---
+
+## 通道 B 的异画内联与内容闸（2026-09-25 补，v1.3）
+
+**背景**：本 core 没有 `Duel.LoadScript`，异画卡脚本（整个文件只有一行
+`RD.AlternateCard(N)`）必须在**生成期或安装期**摊平成原型卡源码，否则进局后效果不注册
+⇒「功能失灵」。两条通道此前口径不一致：通道 A（`unpack_rd.py`）会内联，通道 B
+（`RdDataUpdater`）不会 —— 2026-09-20 玩家经通道 B 装异画包，留下 93 个坏脚本。
+
+**修复（`RdDataUpdater.cs`）**：
+- `ExpandAlternate` / `IsPureAlternateDirective`：内联逻辑与 `unpack_rd.py:expand_alternates`
+  **同口径**（`do … end` 包裹、原型解析「包内 staging 优先 → 已落地 `rd/ai/script/` 兜底」、
+  循环引用与 4 层嵌套检测）。
+- **内容闸**：`ApplyOne` 验名阶段追加 —— 包里**纯指令**的脚本若原型不可解析 ⇒ **整包拒收**，
+  台账记「异画脚本 c… 找不到原型 c…，无法内联」。
+- **尾部残留守卫**：搬运完扫本包落地的脚本，仍残留纯指令 ⇒ 台账 `⚠ residual-alt` +
+  探针 `[rdupdate] residual-alt`（不删文件，只暴露）。
+- **lflist 双侧同源**：落地 `rd/lflist.conf` 后同步同字节写 `rd/ai/config/lflist.conf`。
+- **cdb 归一化**：根部 `RD Patch.cdb` → `cdb/rd_patch.cdb`、`RD Alternate.cdb` →
+  `cdb/rd_alternate.cdb`（此前后者未归一化，与规范化名重复共存、被装两遍）。
+
+**验收**：`python _verify_rdupdate_inline.py`（U1 内联正路 / U2 内容闸拒收 / U3 lflist
+双侧同源 / U4 清场，16 条判据）。
+
+---
+
+## 客户端本体自更新（2026-09-25，v1.3）
+
+**边界**：只做「客户端本体版本」的**检查 + 提示 + 指路**，**不**自动下载安装；
+`ClientDataUpdater` / `RdDataUpdater` / 超先行下载三套既有机制一律不动。
+
+**实现**：`Assets/SibylSystem/ResourceManagers/ClientSelfUpdate.cs`
+- 版本常量 `ClientVersionText = "1.3"`（与 `Config.ClientVersion` 协议号解耦）。
+- 版本源 = **候选列表**（Config ini `clientUpdateVersionUrls` 覆盖 → 否则内置默认）：
+  ① `https://fastly.jsdelivr.net/gh/OverClimber/MeiheweitePro@main/version.txt`（jsDelivr，首选）
+  ② `https://raw.githubusercontent.com/OverClimber/MeiheweitePro/main/version.txt`
+  ③ `https://gh-proxy.com/https://raw.githubusercontent.com/OverClimber/MeiheweitePro/main/version.txt`
+  ⛔ `raw.gitmirror.com` / `raw.kkgithub.com` **实测已失效（code=000）**，勿加。
+  逐个尝试，首个成功即用；全失败静默（不影响启动）。
+- 复用 `UnityFileDownloader.DownloadFileAsync`（**只调用，不改**）拉文本 → 首行 = 版本串。
+- 比较口径：去 `v` 前缀后**字符串不等即视为有更新**（对齐 mdpro3，不做语义化解析）。
+- 去重：已见版本存 Config ini `lastSeenClientVersion`，同一版本只提示一次。
+- UI：主菜单标题显示 **`MeiheweitePro v1.3`**（`VersionBaseText`，不再暴露上游 2.4.d/1036.2）；
+  「资源更新」选择窗新增「检查客户端更新」项 → 检查 + 「打开下载页」按钮（跳夸克）。
+- 下载页：Config ini `clientUpdatePageUrl`，默认 `https://pan.quark.cn/s/d2dd58b3d27e`。
+
+**发布端流程（每次发版）**：
+1. 改代码 → 编译 → 打包新完整包；
+2. 上传到夸克网盘（原分享页里更新文件；换分享链接则同步改 ini `clientUpdatePageUrl`）；
+3. 改仓库根 `main` 分支 `version.txt` 一行版本号 → commit + push（客户端据此发现新版）；
+4. 爱发电/群发公告。
+
+**验收**：`python _verify_clientselfupdate.py`（V1 检查启动 / V2 有结论 / V3 无旧串 / V4 版本源 / V5 config 键）。
+
+### 客户端本体增量包设计要求（**本轮只预留接口，未实现**）
+
+用户口径（2026-09-25）：增量包不急着做，只预留接口 ⇒ 本轮**不**新增
+`ClientUpdateUpdater.cs` / `clientupdate/` 目录 / 打包脚本。
+
+预留点：`ClientSelfUpdate.IClientUpdateSink`（默认实现 `DefaultSink` 只做「提示 + 打开下载页」）。
+将来做增量包时新增一个实现类挂到 `ClientSelfUpdate.Sink` 即可，主流程不用改。
+
+**已调研的文件集**（客户端代码更新真正会变的，已实测分发包）：
+
+| 分类 | 文件 | 大小 |
+| --- | --- | --- |
+| 程序集 | `MeiheweitePro_Data/Managed/Assembly-CSharp.dll`(+`Assembly-CSharp-firstpass.dll`) | ~1.5 MB + 107 KB |
+| 可执行 | `MeiheweitePro.exe` | 654 KB |
+| 附属可执行 | `AI.Server.exe`（core，须与客户端同版本） | 3.3 MB |
+| 烘焙资源（仅改 UI/prefab 时） | `MeiheweitePro_Data/{globalgamemanagers*,level0,resources.assets,sharedassets0.assets,Resources/*}` | ~14 MB |
+
+**实现时的设计要求**（另建一套，与 `rd/update/` 平行、互不干扰）：
+- 投放目录 `clientupdate/`；包 = 普通 zip，条目路径 = **相对游戏根**，白名单只允许上表四类。
+- 安全闸（照抄 `RdDataUpdater` 三道闸口径）：拒绝绝对路径/`..`/白名单外；解压先进 `.staging`，
+  全成功才整体搬运；**落地前先备份被覆盖文件**到 `clientupdate/backup/<时间戳>/`（客户端本体
+  比卡数据危险，必须可回滚）；台账 `log/client_update.log`。
+- ⚠ **不能在运行中覆盖被占用的 exe/dll** ⇒ 采用「**只落盘 + 启动时应用**」，与
+  `RdDataUpdater.ApplyPendingPacks()` 同时机（`Program.cs`），重启生效。
+- 打包工具 `devtools/pack_client_update.py`：输入交付树 + 上一版快照（或基准 manifest），
+  输出只含变化文件的包 + manifest（`路径,md5,大小`）。

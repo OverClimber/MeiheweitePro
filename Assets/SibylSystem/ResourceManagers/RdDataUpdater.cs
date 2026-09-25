@@ -84,7 +84,11 @@ public static class RdDataUpdater
             string lower = name.ToLowerInvariant();
             if (lower.EndsWith(".cdb"))
             {
-                // 「RD Patch.cdb」→ 覆盖补丁层 rd/cdb/rd_patch.cdb（归一化：去空格/下划线/连字符）。
+                // 根部 cdb 归一化（去空格/下划线/连字符后比对）：
+                //   「RD Patch.cdb」    → cdb/rd_patch.cdb（补丁层，同名即换代）
+                //   「RD Alternate.cdb」→ cdb/rd_alternate.cdb（异画层 —— 曾因未归一化
+                //      与 rd_alternate.cdb 重名共存，被 Program.LoadRdDatabase 装两遍）
+                // 其它名字保持原样落 cdb/<原名>。
                 StringBuilder sb = new StringBuilder(lower);
                 for (int i = sb.Length - 1; i >= 0; i--)
                 {
@@ -94,9 +98,14 @@ public static class RdDataUpdater
                         sb.Remove(i, 1);
                     }
                 }
-                if (sb.ToString() == "rdpatch.cdb")
+                string norm = sb.ToString();
+                if (norm == "rdpatch.cdb")
                 {
                     return "cdb/rd_patch.cdb";
+                }
+                if (norm == "rdalternate.cdb")
+                {
+                    return "cdb/rd_alternate.cdb";
                 }
                 return "cdb/" + name;
             }
@@ -326,6 +335,59 @@ public static class RdDataUpdater
                 throw new Exception("空包");
             }
 
+            // 内容闸（防复发核心）：包里**纯 RD.AlternateCard 指令**的脚本必须能内联，
+            // 否则整包拒收（宁可装不上，也不留下「装完了某卡失灵」）。这正对 2026-09-20
+            // 那次事故：异画包经本通道原样覆盖，93 张卡进局后效果不注册。
+            // 判定所需信息：包内脚本集合 + 已落地 rd/ai/script/。
+            HashSet<string> zipScripts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ZipEntry entry in zip)
+            {
+                if (entry.IsDirectory)
+                {
+                    continue;
+                }
+                string t = MapEntry(entry.FileName);
+                if (t != null && t.StartsWith("ai/script/", StringComparison.OrdinalIgnoreCase)
+                    && t.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
+                {
+                    zipScripts.Add(Path.GetFileName(t));
+                }
+            }
+            foreach (ZipEntry entry in zip)
+            {
+                if (entry.IsDirectory)
+                {
+                    continue;
+                }
+                string t = MapEntry(entry.FileName);
+                if (t == null || !t.StartsWith("ai/script/", StringComparison.OrdinalIgnoreCase)
+                    || !t.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                string text;
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    entry.Extract(ms);
+                    text = Encoding.UTF8.GetString(ms.ToArray());
+                }
+                if (!IsPureAlternateDirective(text))
+                {
+                    continue; // 含其它内容的脚本原样放行
+                }
+                int code = 0;
+                System.Text.RegularExpressions.Match mm = AltCardRe.Match(text);
+                int.TryParse(mm.Groups[1].Value, out code);
+                // 原型解析：包内优先，已落地兜底。
+                bool resolvable = zipScripts.Contains("c" + code + ".lua")
+                    || File.Exists("rd/ai/script/c" + code + ".lua");
+                if (!resolvable)
+                {
+                    throw new Exception("异画脚本 " + Path.GetFileName(t)
+                        + " 找不到原型 c" + code + ".lua（包内与已落地都没有），无法内联");
+                }
+            }
+
             // 名字全合法才放行解压。
             zip.ExtractAll(StagingDir, ExtractExistingFileAction.OverwriteSilently);
             zip.Dispose();
@@ -333,31 +395,152 @@ public static class RdDataUpdater
 
             // staging → rd/ 映射搬运。rd/ 在启动这一刻没有任何句柄握着
             //（卡包 zip 句柄只挂 expansions/data；rd 的 cdb 是读到内存就关）。
+            //
+            // ⚠ 分两趟搬：**先非脚本、再脚本**。异画脚本要内联，而内联要从 staging 里
+            //   的同包兄弟文件取原型；先搬完普通文件（含被指向的原型脚本已在包内时，
+            //   原型本就同属「脚本」趟，靠 resolve 同时看 staging 与已落盘 rd/）。
+            //   真正的原因是：不能依赖 zip 条目遍历顺序 —— 把所有脚本放一趟、用
+            //   「staging 优先、已落地兜底」的解析顺序，就与顺序无关了。
             long bytes = 0;
             int moved = 0, skipped = 0;
+            int inlined = 0;            // 内联展开的处数（诊断用）
             List<string> stagedCdbs = new List<string>();
-            foreach (string src in Directory.GetFiles(StagingDir, "*", SearchOption.AllDirectories))
+            List<string> allFiles = new List<string>(
+                Directory.GetFiles(StagingDir, "*", SearchOption.AllDirectories));
+            // 稳定排序，保证台账与诊断可复现。
+            allFiles.Sort(StringComparer.OrdinalIgnoreCase);
+
+            // 先建一份「staging 内全部脚本 → 源码」的索引，供异画内联解析（不看遍历顺序）。
+            Dictionary<string, string> stagedScripts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string f in allFiles)
             {
-                string rel = src.Substring(StagingDir.Length).Replace('\\', '/').TrimStart('/');
-                string target = MapEntry(rel);
-                if (target == null)
+                string r = f.Substring(StagingDir.Length).Replace('\\', '/').TrimStart('/');
+                string t = MapEntry(r);
+                if (t != null && t.StartsWith("ai/script/", StringComparison.OrdinalIgnoreCase)
+                    && t.EndsWith(".lua", StringComparison.OrdinalIgnoreCase))
                 {
-                    skipped++;
-                    continue;
+                    string key = Path.GetFileName(t);
+                    if (!stagedScripts.ContainsKey(key))
+                    {
+                        stagedScripts.Add(key, f);
+                    }
                 }
-                string dst = "rd/" + target;
-                string dir = Path.GetDirectoryName(dst);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            }
+            // 解析委托：先查本包 staging，再查已落地的 rd/ai/script/（异画原型通常在正式卡包里，已安装）。
+            Func<int, string> resolveScript = delegate (int tcode)
+            {
+                string fn = "c" + tcode + ".lua";
+                string p;
+                if (stagedScripts.TryGetValue(fn, out p) && File.Exists(p))
                 {
-                    Directory.CreateDirectory(dir);
+                    return File.ReadAllText(p, Encoding.UTF8);
                 }
-                File.Copy(src, dst, true);
-                bytes += new FileInfo(src).Length;
-                moved++;
-                if (target.StartsWith("cdb/", StringComparison.OrdinalIgnoreCase))
+                string landed = "rd/ai/script/" + fn;
+                return File.Exists(landed) ? File.ReadAllText(landed, Encoding.UTF8) : null;
+            };
+
+            for (int pass = 0; pass < 2; pass++)
+            {
+                foreach (string src in allFiles)
                 {
-                    stagedCdbs.Add(src);
+                    string rel = src.Substring(StagingDir.Length).Replace('\\', '/').TrimStart('/');
+                    string target = MapEntry(rel);
+                    if (target == null)
+                    {
+                        if (pass == 0)
+                        {
+                            skipped++;
+                        }
+                        continue;
+                    }
+                    bool isScript = target.StartsWith("ai/script/", StringComparison.OrdinalIgnoreCase)
+                        && target.EndsWith(".lua", StringComparison.OrdinalIgnoreCase);
+                    // pass 0 = 非脚本；pass 1 = 脚本。跳过不含在本次趟次的条目。
+                    if (isScript != (pass == 1))
+                    {
+                        continue;
+                    }
+                    string dst = "rd/" + target;
+                    string dir = Path.GetDirectoryName(dst);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+                    if (isScript)
+                    {
+                        // 脚本：读文本，纯指令就地内联，其余原样写。
+                        string text = File.ReadAllText(src, Encoding.UTF8);
+                        if (IsPureAlternateDirective(text))
+                        {
+                            int code = 0;
+                            System.Text.RegularExpressions.Match mm = AltCardRe.Match(text);
+                            int.TryParse(mm.Groups[1].Value, out code);
+                            int[] counter = new int[1];
+                            string expanded = ExpandAlternate(code, text, resolveScript, 0, null, counter);
+                            File.WriteAllText(dst, expanded, Encoding.UTF8);
+                            inlined += counter[0];
+                            bytes += Encoding.UTF8.GetByteCount(expanded);
+                        }
+                        else
+                        {
+                            File.Copy(src, dst, true);
+                            bytes += new FileInfo(src).Length;
+                        }
+                    }
+                    else
+                    {
+                        File.Copy(src, dst, true);
+                        bytes += new FileInfo(src).Length;
+                    }
+                    moved++;
+                    if (target.StartsWith("cdb/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        stagedCdbs.Add(src);
+                    }
                 }
+            }
+
+            // lflist 双侧同源：客户端 rd/lflist.conf 落地后，同步同字节写 AI 侧
+            // rd/ai/config/lflist.conf（AI.Server 读 config/lflist.conf），
+            // 否则两侧禁限口径分家（与 unpack_rd.py 阶段 6 同口径）。
+            bool lflistSynced = false;
+            if (File.Exists("rd/lflist.conf"))
+            {
+                try
+                {
+                    string lfDir = "rd/ai/config";
+                    if (!Directory.Exists(lfDir))
+                    {
+                        Directory.CreateDirectory(lfDir);
+                    }
+                    File.Copy("rd/lflist.conf", lfDir + "/lflist.conf", true);
+                    lflistSynced = true;
+                }
+                catch (Exception e)
+                {
+                    QuickTestTrace.Log("rdupdate", "lflist-sync failed " + e.Message);
+                }
+            }
+
+            // 尾部自检：本包落地的脚本里仍残留「纯指令」⇒ 说明有没被内联的（不该发生）。
+            // 不删已落地文件，只暴露（台账 ⚠ + 探针），便于事后排查。
+            int residual = 0;
+            foreach (KeyValuePair<string, string> kv in stagedScripts)
+            {
+                string landed = "rd/ai/script/" + kv.Key;
+                try
+                {
+                    if (File.Exists(landed) && IsPureAlternateDirective(File.ReadAllText(landed, Encoding.UTF8)))
+                    {
+                        residual++;
+                    }
+                }
+                catch { }
+            }
+            if (residual > 0)
+            {
+                Ledger(Stamp() + " | ⚠ residual-alt | " + packName + " | " + residual + " 个脚本仍是纯 RD.AlternateCard 指令");
+                QuickTestTrace.Log("rdupdate", "residual-alt " + packName + " count=" + residual);
             }
 
             // AI 侧同步：包里带了卡表就把内容并入 rd/ai/cdb/cards.cdb（失败不追溯包）。
@@ -371,10 +554,14 @@ public static class RdDataUpdater
 
             string line = Stamp() + " | applied | " + packName + " | files=" + moved
                 + " | bytes=" + bytes + " | ai_merge=" + merged
+                + (inlined > 0 ? " | inlined=" + inlined : "")
+                + (lflistSynced ? " | lflist_sync=1" : "")
+                + (residual > 0 ? " | residual=" + residual : "")
                 + (skipped > 0 ? " | skipped=" + skipped : "")
                 + (deleteOnSuccess ? "" : " | kept（选择器安装，原包保留）");
             Ledger(line);
-            QuickTestTrace.Log("rdupdate", "applied " + packName + " files=" + moved + " bytes=" + bytes + " ai_merge=" + merged);
+            QuickTestTrace.Log("rdupdate", "applied " + packName + " files=" + moved + " bytes=" + bytes
+                + " ai_merge=" + merged + " inlined=" + inlined + " residual=" + residual);
             return true;
         }
         catch (Exception e)
@@ -396,6 +583,90 @@ public static class RdDataUpdater
             }
             return false;
         }
+    }
+
+    // ---------- 异画脚本内联（与 devtools/unpack_rd.py:expand_alternates 同口径） ----------
+
+    /// <summary>匹配一行的 <c>RD.AlternateCard(N)</c>。与 unpack_rd.py 的 ALT_CARD_RE 同义。</summary>
+    static readonly System.Text.RegularExpressions.Regex AltCardRe =
+        new System.Text.RegularExpressions.Regex(@"RD\.AlternateCard\s*\(\s*(\d+)\s*\)");
+
+    /// <summary>内联最大嵌套深度（与 unpack_rd.py 的 ALT_CARD_MAX_DEPTH 一致）。</summary>
+    const int AltCardMaxDepth = 4;
+
+    /// <summary>
+    /// 把脚本源码里的 <c>RD.AlternateCard(N)</c> 就地展开成目标卡 c&lt;N&gt;.lua 的源码。
+    ///
+    /// 原版：<c>RushDuel.AlternateCard(code)</c> = <c>Duel.LoadScript("c"..code..".lua")</c>，
+    /// 异画卡脚本整个文件就一行 —— 语义是「复用那张卡的实现，但 self_table/self_code 仍是我自己」。
+    /// 本 core 没有 Duel.LoadScript（二进制里 "LoadScript" 命中 0 次），故装包期必须摊平，
+    /// 否则异画卡进局后效果不注册 ⇒ **功能失灵**（2026-09-20 事故：93 张异画经本通道装入）。
+    ///
+    /// 包裹用 <c>do ... end</c>：原版被加载的 chunk 顶层 local 是自己的作用域，包一层块才等值。
+    /// </summary>
+    /// <param name="code">当前脚本的卡码（仅用于报错）。</param>
+    /// <param name="source">当前脚本源码。</param>
+    /// <param name="resolve">取目标卡源码的委托（返回 null = 找不到）。</param>
+    /// <param name="depth">当前嵌套深度。</param>
+    /// <param name="stack">调用链（循环引用检测）。</param>
+    /// <param name="counter">已展开处数累加器（可为 null）。</param>
+    static string ExpandAlternate(int code, string source, Func<int, string> resolve,
+        int depth = 0, long[] stack = null, int[] counter = null)
+    {
+        if (source == null || !AltCardRe.IsMatch(source))
+        {
+            return source;
+        }
+        if (stack == null)
+        {
+            stack = new long[0];
+        }
+        return AltCardRe.Replace(source, delegate (System.Text.RegularExpressions.Match m)
+        {
+            int target = int.Parse(m.Groups[1].Value);
+            for (int i = 0; i < stack.Length; i++)
+            {
+                if (stack[i] == target)
+                {
+                    throw new Exception("异画卡循环引用：c" + code + " -> c" + target);
+                }
+            }
+            if (depth >= AltCardMaxDepth)
+            {
+                throw new Exception("异画卡嵌套超过 " + AltCardMaxDepth + " 层（c" + code + "）");
+            }
+            string sub = resolve(target);
+            if (sub == null)
+            {
+                throw new Exception("异画脚本 c" + code + ".lua 找不到原型 c" + target + ".lua，无法内联");
+            }
+            long[] next = new long[stack.Length + 1];
+            Array.Copy(stack, next, stack.Length);
+            next[stack.Length] = code;
+            string body = ExpandAlternate(target, sub, resolve, depth + 1, next, counter);
+            if (counter != null)
+            {
+                counter[0]++;
+            }
+            return "do -- >>> 内联异画卡 c" + target + "（原脚本此处的 RD.AlternateCard(" + target + ")）\n"
+                + body + "\n-- <<< 内联异画卡 c" + target + "\nend";
+        });
+    }
+
+    /// <summary>脚本是否**仅**含一行 RD.AlternateCard(N)（允许空白/换行/BOM，不含其它有效内容）。</summary>
+    static bool IsPureAlternateDirective(string source)
+    {
+        if (string.IsNullOrEmpty(source))
+        {
+            return false;
+        }
+        if (!AltCardRe.IsMatch(source))
+        {
+            return false;
+        }
+        // 去掉所有指令出现后若还剩非空白 ⇒ 不是「纯指令」，原样放行（不要动玩家自己写的内容）。
+        string stripped = AltCardRe.Replace(source, "");
+        return stripped.Trim().Length == 0;
     }
 
     /// <summary>
