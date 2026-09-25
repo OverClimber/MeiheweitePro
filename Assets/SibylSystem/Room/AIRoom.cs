@@ -802,12 +802,27 @@ public class AIRoom : WindowServantSP
         serverProcess.StartInfo.UseShellExecute = false;
         serverProcess.StartInfo.FileName = serverExe;
         serverProcess.StartInfo.WorkingDirectory = serverDir;
-        // 参数表逐字对齐 ygoserver/gframe.cpp：
-        //   [port] [-1] [5] [0] [F] [nocheck] [noshuffle] [8000=初始LP] **[初始手牌]** [1=通常抽卡] [0] [0] [seed]
+        // 参数表（第 1 格 = 端口，不含 exe）。2026-09-21 用直连探针把每一格的落点实测了一遍
+        // （`_probe_argtable.py`：一次只动一格，看回过来的 STOC_JoinGame 哪个字段跟着动）：
+        //   1  [port]             7911
+        //   2  [?]                -1        ← 改成 -9 无任何字段变化，用途未定
+        //   3  [卡池]             5         ← JoinGame.rule：0 OCG/1 TCG/2 简中/3 自制/4 无独有/5 混合
+        //   4  [mode]             0         ← JoinGame.mode：0 单局/1 比赛/2 双打
+        //   5  **[duel_rule]**    ← 按模式取（RD=3 对齐联机，OCG=5）→ 客户端读成 Ocgcore.MasterRule
+        //   6  [nocheck]          T/F       ← JoinGame.no_check_deck
+        //   7  [noshuffle]        T/F       ← JoinGame.no_shuffle_deck
+        //   8  [start_lp]         8000
+        //   9  **[初始手牌]**     ← 按模式取（RD=4 / OCG=5）
+        //   10 [draw_count]       1
+        //   11 [time_limit]       0
+        //   12 [?]                0         ← 改成 9 无任何字段变化，用途未定
+        //   13 [seed]
+        // ⛔ 第 3 格是**卡池**不是规则号，别把 DuelRule 塞回那里（细节与实测见
+        //   GameModeManager.DuelRule 的注释）。
         // 初始手牌按模式取：OCG 5 张、RD 4 张（RD 规则「初期手卡 4 张」）。
         // 这里喂错一张的连锁是「整局起手多一张」，且**改 lua 补不回来**（起手先于任何 lua 效果），
         // 判定性实测与理由见 GameModeManager.StartHand 的注释。
-        serverProcess.StartInfo.Arguments = "7911 -1 5 0 F " + (nocheck ? "T" : "F") + " " + (noshuffle ? "T" : "F") + " 8000 " + GameModeManager.StartHand + " 1 0 0 " + seed;
+        serverProcess.StartInfo.Arguments = "7911 -1 5 0 " + GameModeManager.DuelRule + " " + (nocheck ? "T" : "F") + " " + (noshuffle ? "T" : "F") + " 8000 " + GameModeManager.StartHand + " 1 0 0 " + seed;
         serverProcess.StartInfo.CreateNoWindow = true;
         serverProcess.StartInfo.RedirectStandardOutput = true;
         // stderr 也接管（同样会被 StdoutDrain 读干）：AI.Server 的 lua 报错走这里，
@@ -894,9 +909,12 @@ public class AIRoom : WindowServantSP
 
         QuickTestTrace.Log("launch", "bot=" + command + " lockhand=" + lockhand + " nocheck=" + nocheck + " noshuffle=" + noshuffle
             + " mode=" + GameModeManager.ModeLabel + " server=" + serverExe + " botdir=" + botDir
-            // 初始手牌是「开局抽几张」的唯一来源（argv[8]），离线排查时看这一条就够，
+            // 初始手牌是「开局抽几张」的唯一来源（命令行第 9 格），离线排查时看这一条就够，
             // 不必去猜 core。验收脚本也按它判「RD 给的是 4 不是 5」。
-            + " startHand=" + GameModeManager.StartHand);
+            + " startHand=" + GameModeManager.StartHand
+            // 规则号（命令行第 5 格）：开局后 core 下发的 MasterRule 就是它 ——
+            // 验收探针 [rule]/[field] 那几行与本行对照着看。
+            + " duelRule=" + GameModeManager.DuelRule);
 
         ChildProcessTracker.AddProcess(serverProcess);
         ChildProcessTracker.AddProcess(botProcess);

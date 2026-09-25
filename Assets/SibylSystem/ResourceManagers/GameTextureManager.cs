@@ -15,6 +15,12 @@ public enum GameTextureType
     card_picture = 0,
     card_verticle_drawing = 1,
     card_feature = 3,
+    // 🔑 RD 极大怪兽**本体**的「单体立绘」变体（用户 2026-09-24 晚报：本体单独召唤时
+    //   显示的是极大宽幅立绘）。资源口径：closeup/{code}_2.png = 单体立绘（512 方图），
+    //   closeup/{code}.png = 极大立绘（~970 宽幅，三件合体用）。本体挂着 L/R 素材
+    //   （极大状态）走 card_verticle_drawing；单独在场（素材数 0）走本类型 ——
+    //   缓存键 (code,type) 天然分开，两种状态各留一份纹理。
+    card_verticle_drawing_single = 4,
 }
 
 public class GameTextureManager
@@ -209,6 +215,9 @@ public class GameTextureManager
 
     public static Texture2D mp1 = null;
 
+    // RD 用：mp1.png 擦掉末尾「1」并重新居中（devtools/make_rd_mp1.py 派生；缺文件 = null）
+    public static Texture2D mp1RD = null;
+
     public static Texture2D mp2 = null;
 
     public static Texture2D dp = null;
@@ -217,7 +226,19 @@ public class GameTextureManager
 
 
 
+    /// <summary>阶段条底板（原生六格：DP/SP/MP1/BP/MP2/EP）。</summary>
     public static Texture2D phase = null;
+
+    /// <summary>
+    /// RD 阶段条底板（**四格**：DP/MP1/BP/EP）—— 由 `devtools/make_rd_phase.py`
+    /// 从 <see cref="phase"/> 派生（同样式、四格等距、原六格五箭头擦干净）。
+    ///
+    /// 为什么要第二张：RD 只走 4 个阶段，六个标签藏掉两个之后，六格底板就会在条上
+    /// 留下两个空格子把四个阶段**隔开**（用户口径：「不要因为没了的阶段卡分开」）。
+    /// 它是**可选资源**：缺文件时 `getTexture2D` 返回 null ⇒ 整条不画底板（四格布局照旧），
+    /// 见 `gameField.applyPhaseBarLayout()`。
+    /// </summary>
+    public static Texture2D phaseRD = null;
 
 
 
@@ -276,7 +297,8 @@ public class GameTextureManager
                                 Debug.Log("e 2" + e.ToString());
                             }
                         }
-                        if (pic.type == GameTextureType.card_verticle_drawing)
+                        if (pic.type == GameTextureType.card_verticle_drawing
+                            || pic.type == GameTextureType.card_verticle_drawing_single)
                         {
                             try
                             {
@@ -297,18 +319,21 @@ public class GameTextureManager
         }
     }
 
-    private static BitmapHelper getCloseup(PictureResource pic)
+    private static BitmapHelper getCloseup(PictureResource pic, bool singleVariant = false)
     {
         BitmapHelper bitmap = null;
         bool found = false;
         string code = pic.code.ToString();
+        // 🔑 单体立绘变体（card_verticle_drawing_single）：先查 {code}_2.png；
+        //   资源没铺 _2 的卡（L/R 部件、普通卡）回落到 {code}.png —— 宽幅极大立绘
+        //   总比空白卡背好。极大状态（挂素材）恒用 {code}.png，不走这里。
         foreach (ZipFile zip in GameZipManager.Zips)
         {
             if (zip.Name.ToLower().EndsWith("script.zip"))
                 continue;
             foreach (string file in zip.EntryFileNames)
             {
-                if (Regex.IsMatch(file.ToLower(), "closeup/" + code + "\\.png$"))
+                if (Regex.IsMatch(file.ToLower(), "closeup/" + code + (singleVariant ? "_2" : "") + "\\.png$"))
                 {
                     MemoryStream ms = new MemoryStream();
                     ZipEntry e = zip[file];
@@ -324,11 +349,20 @@ public class GameTextureManager
         if (!found)
         {
             // 立绘目录同样按模式走（RD 的立绘随包在 rd/picture/closeup/）。
-            string path = GameModeManager.CloseupPictureDir + "/" + code + ".png";
+            string path = GameModeManager.CloseupPictureDir + "/" + code + (singleVariant ? "_2" : "") + ".png";
             if (File.Exists(path))
             {
                 bitmap = new BitmapHelper(path);
-                PicTrace("closeup", code, path, (int)new FileInfo(path).Length, false);
+                PicTrace("closeup", code + (singleVariant ? "_2" : ""), path, (int)new FileInfo(path).Length, false);
+            }
+        }
+        if (bitmap == null && singleVariant)
+        {
+            // _2 没找到 → 回落原版立绘（走一遍常规查找，日志里报回落）。
+            bitmap = getCloseup(pic, false);
+            if (bitmap != null && QuickTestTrace.Enabled)
+            {
+                QuickTestTrace.Log("pic", "kind=closeup code=" + code + "_2 MISSING -> 回落 " + code + ".png");
             }
         }
         return bitmap;
@@ -707,7 +741,8 @@ public class GameTextureManager
         {
             return;
         }
-        var bitmap = getCloseup(pic);
+        // 🔑 单体立绘变体（RD 极大怪兽本体单独在场）：closeup 优先查 {code}_2.png。
+        var bitmap = getCloseup(pic, pic.type == GameTextureType.card_verticle_drawing_single);
         if (bitmap == null)
         {
             bool EightEdition;
@@ -1000,11 +1035,14 @@ public class GameTextureManager
         bp = UIHelper.getTexture2D("texture/duel/phase/bp.png");
         ep = UIHelper.getTexture2D("texture/duel/phase/ep.png");
         mp1 = UIHelper.getTexture2D("texture/duel/phase/mp1.png");
+        mp1RD = UIHelper.getTexture2D("texture/duel/phase/mp1_rd.png");
         mp2 = UIHelper.getTexture2D("texture/duel/phase/mp2.png");
         dp = UIHelper.getTexture2D("texture/duel/phase/dp.png");
         sp = UIHelper.getTexture2D("texture/duel/phase/sp.png");
 
         phase = UIHelper.getTexture2D("texture/duel/phase/phase.png");
+        // RD 那张是**可选**的（缺文件 → null → 不画底板）。见 phaseRD 的注释。
+        phaseRD = UIHelper.getTexture2D("texture/duel/phase/phase_rd.png");
 
         rs = UIHelper.getTexture2D("texture/duel/phase/rs.png");
         ts = UIHelper.getTexture2D("texture/duel/phase/ts.png");

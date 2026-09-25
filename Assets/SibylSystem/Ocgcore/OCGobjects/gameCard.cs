@@ -70,6 +70,13 @@ public class gameCard : OCGobject
 
     public bool cookie_cared = false;
 
+    /// <summary>
+    /// RD 极大怪兽「落稳」判据用：上一帧本卡的世界坐标，以及有没有填过。
+    /// 出处与用法见 Ocgcore.rdMaximumLanded（**每帧每卡只能被写一次**，那边有说明）。
+    /// </summary>
+    public Vector3 rdMaxPrevPos;
+    public bool rdMaxPrevSet = false;
+
     public bool forSelect = false;
 
     public int selectPtr = 0;
@@ -264,6 +271,18 @@ public class gameCard : OCGobject
         return data.IsExtraCard();
     }
 
+    /// <summary>
+    /// 这张卡**当前**的卡面半长（世界单位）：基准 face localScale.y=4 ⇒ 半长 2；
+    /// 手牌/摊开行带在俯视角整体放大 s（1.5）作用在父级上 ⇒ lossyScale.y=6 ⇒ 半长 3。
+    /// 「卡面上方」一族偏移必须跟它走 —— 用户 2026-09-23 第 5 轮实机：俯视手牌放大后
+    /// 闪光锚点没跟着长，2.4 &lt; 3 ⇒ 又掉回卡面里（「参考斜视角下的相对距离」= 半长的 h 倍）。
+    /// </summary>
+    private float faceHalfWorld()
+    {
+        Transform f = gameObject_face.transform;
+        return f != null ? f.lossyScale.y * 0.5f : 2f;
+    }
+
     void RefreshFunction_decoration()
     {
         for (int i = 0; i < cardDecorations.Count; i++)
@@ -271,28 +290,76 @@ public class gameCard : OCGobject
             if (cardDecorations[i].game_object != null)
             {
                 Vector3 screenposition = Vector3.zero;
-                if (cardDecorations[i].up_of_card)
+                // 选择类标志（可选卡的**三角标志** / 连锁选择标志 / 已选蓝光）单独一支：
+                // 它们在 60° 下从卡心往相机方向冒，正俯视下照原样摆不是被压成侧棱就是
+                // 被透视位移甩出卡外。俯视角改为：翻平/贴卡 + 锚到卡面这一侧。
+                // 用户 2026-09-23 第 5 轮：「别的卡上相关的东西也要做好适配，如卡组选卡时的三角标志」；
+                // 第 8 轮把 `selected` 补进名单 —— ⛔ Ocgcore.cs:6894/6968 添加时传的描述串是
+                //    **"selected"**（不是 "card_selected"），旧名单里那个串根本没人传 ⇒
+                //    蓝色已选标志俯视角既没翻平也没收距离（用户：「蓝色选择图标离卡的距离太远了」）。
+                bool selectingMark = Program.topDown
+                    && (cardDecorations[i].desctiption == "card_selecting"
+                        || cardDecorations[i].desctiption == "chain_selecting"
+                        || cardDecorations[i].desctiption == "selected");
+                bool selectedMark = selectingMark && cardDecorations[i].desctiption == "selected";
+                if (cardDecorations[i].up_of_card || selectingMark)
                 {
-                    screenposition = Program.camera_game_main.WorldToScreenPoint(gameObject_face.transform.position + new Vector3(0, 1.2f, 1.2f * 1.732f));
+                    // 「卡面上方 h」的偏移口径收在 `Program.cardUpOffset` 一处 ——
+                    // ⛔ 原先写死的 `(0, 1.2, 1.2·1.732)` 是**卡对象自己的上方向**（卡面仰起 30°），
+                    //   正俯视下卡面被压平、那个方向变成世界 +z，照搬就会让「可发动闪光 / 特召闪光」
+                    //   从卡上沿之外掉进卡面中间（用户 2026-09-23 实机报的「光点变成在卡牌中间」）。
+                    // ⛔ 偏移必须乘**这张卡当前的半长**（手牌/摊开放大 1.5 倍后固定 2.4 < 3 会掉回卡面里）。
+                    // `selected` 例外：它是**粒子 billboard 光环**（card_selected prefab，蓝色 5×3 帧
+                    //   动画、startSize 8），语义是「罩着这张卡」，锚**卡面中心**就好 —— 抬到卡上沿
+                    //   反而把一圈光推离卡面。距离也收紧：相对位移在俯视角下随「离屏幕中心越远越放大」
+                    //   （机高 31.7 时 3 世界 ≈ 屏缘 +10% ≈ 手牌行 +38px，用户报的「太远」就是它），
+                    //   收到 0.8（刚好垫在卡面之上渲染，60° 视角不动 —— 这一支只在 topDown 分支里）。
+                    Vector3 anchor = selectedMark
+                        ? gameObject_face.transform.position
+                        : gameObject_face.transform.position + Program.cardUpOffset(1.2f, faceHalfWorld());
+                    screenposition = Program.camera_game_main.WorldToScreenPoint(anchor);
                 }
                 else
                 {
                     screenposition = Program.camera_game_main.WorldToScreenPoint(gameObject_face.transform.position);
                 }
-                Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - cardDecorations[i].relative_position));
-                cardDecorations[i].game_object.transform.eulerAngles = cardDecorations[i].rotation;
+                float pull = cardDecorations[i].relative_position;
+                if (selectedMark && pull > 0.8f)
+                {
+                    pull = 0.8f;
+                }
+                Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - pull));
+                // ⛔ 覆写角必须**算上各 prefab 的烘焙角**（`old/loader.prefab` 的字段接线是唯一真相，
+                //    别看 prefab 文件名瞎猜 —— 上一轮就栽在这）：
+                // ・card_selecting → mod_ocgcore_selecting：根 identity + **子 Quad 烘焙 +60° X**
+                //   （专为 60° 相机烘焙）⇒ 根给 30° 时 Quad 世界角 = 30+60 = 90 正好「平铺朝天」。
+                //   给根 90 的写法让 Quad 世界角到 150° —— 从正上方看仍斜着 60°，用户第 6 轮报过。
+                // ・chain_selecting → **mod_ocgcore_chain_selector**（loader.prefab:69 按 guid 接线；
+                //   select_chain_effect/mod_ocgcore_chain_selecting.prefab 那支根本没人引用）：
+                //   与三角同款 **子 Quad 烘焙 +60°** ⇒ 根同样要 30°。第 7 轮前一直给 90°
+                //   ⇒ 世界角 150°，连锁时「选择效果处理的图标还是斜的」（用户第 8 轮）就是它。
+                // ・selected → mod_ocgcore_card_selected：单节点**粒子系统**，billboard 永远面向
+                //   相机，根角度无观感差别，给 90° 保持与「平铺」口径一致。
+                cardDecorations[i].game_object.transform.eulerAngles = selectingMark
+                    ? (cardDecorations[i].desctiption == "selected"
+                        ? new Vector3(90f, 0f, 0f)
+                        : new Vector3(30f, 0f, 0f))
+                    : cardDecorations[i].rotation;
                 cardDecorations[i].game_object.transform.position = worldposition;
                 if (cardDecorations[i].scale_change_ignored == false)
                     cardDecorations[i].game_object.transform.localScale += (new Vector3(1, 1, 1) - cardDecorations[i].game_object.transform.localScale) * 0.3f;
             }
         }
+        // 偏移方向与理由见 `overlayLightOffset` 的注释 ——
+        // 一句话：俯视角下必须换成世界 +z，否则光点糊在卡面正中（用户 2026-09-23 实测）。
         for (int i = 0; i < overlay_lights.Count; i++)
         {
-            overlay_lights[i].transform.position = gameObject_face.transform.position + new Vector3(0, 1.8f, 0);
+            overlay_lights[i].transform.position = gameObject_face.transform.position + overlayLightOffset;
         }
         if (obj_number != null)
         {
-            Vector3 screenposition = Program.camera_game_main.WorldToScreenPoint(gameObject_face.transform.position + new Vector3(0, 1f * 2.4f, 1.732f * 2.4f));
+            Vector3 screenposition = Program.camera_game_main.WorldToScreenPoint(
+                gameObject_face.transform.position + Program.cardUpOffset(2.4f, faceHalfWorld()));
             Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - 5));
             obj_number.transform.position = worldposition;
         }
@@ -464,6 +531,18 @@ public class gameCard : OCGobject
         return re;
     }
 
+    /// <summary>
+    /// 光标是否正指在这张卡的事件碰撞盒上（`card/event`，与 handCardTick/ES_mouse_check
+    /// 用的是同一个对象）—— **纯射线几何**，不看卡当前可不可点。
+    /// 给俯视角「鼠标滑到对方手卡上 ⇒ 拉镜头看牌」用（用户 2026-09-23 第 8 轮）。
+    /// ⛔ 别复用 <see cref="ES_mouse_check"/>：它把 still_unclickable 一票否掉，
+    ///    而对方手牌平时恰恰不可点 —— 但「悬停看牌」要的只是几何指向，不是可点性。
+    /// </summary>
+    public bool ES_pointed_raw()
+    {
+        return gameObject_event_main != null && Program.pointedGameObject == gameObject_event_main;
+    }
+
     public void ES_lock(float time)
     {
         ES_exit_excited(false);
@@ -500,9 +579,161 @@ public class gameCard : OCGobject
         return s;
     }
 
+    /// <summary>
+    /// 这张卡是不是 RD 极大怪兽（RD 模式 + type bit15 = 0x8000；口径同 Ocgcore.isMaximumCard、
+    /// GameStringHelper.typeName）。
+    ///
+    /// ⚠ 本体与 L/R 部件**都**带这个 bit —— 要区分部件再加「已成素材」那一半，见
+    /// <see cref="isRdMaximumPiece"/>。判据里一律带 `GameModeManager.IsRD`：OCG 侧一个像素、
+    /// 一个行为都不该变（0x8000 在 OCG 的 type 位里不是「极大」）。
+    /// </summary>
+    public bool isRdMaximumCard()
+    {
+        return GameModeManager.IsRD && data != null && (data.Type & 0x8000) != 0;
+    }
+
+    /// <summary>这张卡是不是「极大召唤的 L/R 部件」（RD 极大 + 已被收成本体的素材）。</summary>
+    public bool isRdMaximumPiece()
+    {
+        return isRdMaximumCard() && (p.location & (UInt32)CardLocation.Overlay) != 0;
+    }
+
+    /// <summary>
+    /// 排查用：这张卡当前挂着几件「场上表侧怪兽」专属的装饰 —— 竖立绘、怪兽云、
+    /// 等级数字、星级图标。0 = 干净的卡面；非 0 = 被当场上怪兽渲染了。
+    ///
+    /// ⚠ 为什么要单独报这一个数：`UA_give_condition` 里只有 `verticle_clickable`
+    /// 会 `refreshFunctions.Add(card_verticle_drawing_handler + monster_cloude_handler)`
+    /// 并加载这几个对象，而它们画的正是用户 2026-09-22 说的「现在多出来的怪兽立绘、
+    /// 等级」——`verticle_number` 的内容是 `data.Level`（见 card_verticle_drawing_handler），
+    /// `game_object_verticle_Star` 是星级图标。
+    /// 而 `cardHint`（探针里的 `txt` / `probe_hint_text`）画的是牌堆数量、攻防那类**文字**，
+    /// **是另一个对象**：部件在进场上之前（手牌档）就已经被 `set_text("")` 清过一次，
+    /// 之后 `verticle_clickable` 又不会写它 ⇒ 只看 `txt` 会恒为空，
+    /// 把「带着满身装饰」误判成「干净」。判据必须咬这个属性。
+    /// </summary>
+    public int probe_verticle_deco()
+    {
+        int n = 0;
+        if (verticle_number != null) n++;
+        if (game_object_verticle_Star != null) n++;
+        if (game_object_verticle_drawing != null) n++;
+        if (game_object_monster_cloude != null) n++;
+        return n;
+    }
+
+    /// <summary>
+    /// 排查用：这张卡**画在屏幕上的那个矩形** `"x0,y0,x1,y1"`，客户区坐标、左上原点
+    /// （与 `[max]` 里的 `win=`、以及 Program.cs 的 `[mouse] winPos=` 同一口径）。
+    ///
+    /// 用途：RD 大框要「三张无缝拼接 + 一个大框框住」，判据不能只看「中心距 == 卡宽」
+    /// （那只能证明**彼此**贴紧，证明不了框也贴着它们）。有了这个矩形，验收脚本就能拿它当锚，
+    /// 在截图上量「框的描边离卡的外沿几个像素」，量出来的才是真的贴合。
+    ///
+    /// 取角点用 `TransformPoint(±0.5, ±0.5)`：卡面是内置 Quad(1x1)，`face` 自己带
+    /// `localScale(3,4)`，所以它的局部 ±0.5 就是卡面的四个角（缩放在 transform 里）。
+    /// 以**屏幕包围盒**返回（不要求四个角是轴对齐的矩形——卡在场上是有倾角的）。
+    /// </summary>
+    public string probe_face_rect()
+    {
+        if (gameObject_face == null || Program.camera_game_main == null)
+        {
+            return "none";
+        }
+        Transform f = gameObject_face.transform;
+        float x0 = float.MaxValue, x1 = float.MinValue, y0 = float.MaxValue, y1 = float.MinValue;
+        for (int i = 0; i < 4; i++)
+        {
+            Vector3 local = new Vector3((i & 1) == 0 ? -0.5f : 0.5f,
+                                        (i & 2) == 0 ? -0.5f : 0.5f, 0f);
+            Vector3 sp = Program.camera_game_main.WorldToScreenPoint(f.TransformPoint(local));
+            x0 = Math.Min(x0, sp.x); x1 = Math.Max(x1, sp.x);
+            y0 = Math.Min(y0, sp.y); y1 = Math.Max(y1, sp.y);
+        }
+        // Unity 屏幕坐标原点在左下角 ⇒ 换成客户区（左上原点）
+        return ((int)Math.Round(x0)) + "," + (Screen.height - (int)Math.Round(y1)) + ","
+             + ((int)Math.Round(x1)) + "," + (Screen.height - (int)Math.Round(y0));
+    }
+
+    /// <summary>排查用：**选择类标志**（三角 card_selecting）装饰物的**世界欧拉角**，
+    /// 没挂三角时返回 "none"。`RefreshFunction_decoration` 每帧写它的角度 ——
+    /// 俯视角下三角的子 Quad 自带 +60° 烘焙，根节点必须给 30° 才能平铺（见那处注释）。
+    /// 这条访问器让探针咬住「根的实际角度」，防止有人把 30 又改回 90。</summary>
+    public string probe_selecting_mark_euler()
+    {
+        for (int i = 0; i < cardDecorations.Count; i++)
+        {
+            if (cardDecorations[i].game_object != null
+                && cardDecorations[i].desctiption == "card_selecting")
+            {
+                Vector3 e = cardDecorations[i].game_object.transform.eulerAngles;
+                return ((int)Math.Round(e.x)) + "," + ((int)Math.Round(e.y)) + ","
+                     + ((int)Math.Round(e.z));
+            }
+        }
+        return "none";
+    }
+
+    /// <summary>排查用：**连锁选择标志**（chain_selecting 装饰物）的**世界欧拉角**，没挂时返回 "none"。
+    /// 第 8 轮起它的 prefab 是带烘焙 +60° 的 `mod_ocgcore_chain_selector` ⇒ 根 30° 才平铺
+    /// （旧写法根 90° ⇒ 世界角 150°，用户报「连锁时选择效果处理的图标还是斜的」）。
+    /// 这条访问器让探针咬住「根的实际角度」，防止有人改回 90。</summary>
+    public string probe_chain_mark_euler()
+    {
+        for (int i = 0; i < cardDecorations.Count; i++)
+        {
+            if (cardDecorations[i].game_object != null
+                && cardDecorations[i].desctiption == "chain_selecting")
+            {
+                Vector3 e = cardDecorations[i].game_object.transform.eulerAngles;
+                return ((int)Math.Round(e.x)) + "," + ((int)Math.Round(e.y)) + ","
+                     + ((int)Math.Round(e.z));
+            }
+        }
+        return "none";
+    }
+
+    /// <summary>排查用：**已选蓝光**（selected 粒子装饰物）与**本卡卡面中心**的屏幕距离（px），
+    /// 没挂蓝光时返回 "none"。第 8 轮把它的俯视角拉距收到 0.8（旧值 3 会被透视位移甩出
+    /// 卡外，屏缘 ≈ +38px，用户报「蓝色选择图标离卡的距离太远了」）——
+    /// 探针咬「图标还贴不贴着卡」这个外壳，不咬 0.8 这个实现常量。</summary>
+    public string probe_selected_mark_gap()
+    {
+        for (int i = 0; i < cardDecorations.Count; i++)
+        {
+            if (cardDecorations[i].game_object != null
+                && cardDecorations[i].desctiption == "selected")
+            {
+                Vector3 a = Program.camera_game_main.WorldToScreenPoint(
+                    cardDecorations[i].game_object.transform.position);
+                Vector3 b = Program.camera_game_main.WorldToScreenPoint(
+                    gameObject_face.transform.position);
+                float d = Vector2.Distance(new Vector2(a.x, a.y), new Vector2(b.x, b.y));
+                return ((int)Math.Round(d)).ToString();
+            }
+        }
+        return "none";
+    }
+
+    /// <summary>排查用：卡面的**世界尺寸** `"宽,高"`（Quad(1x1) × face 的 lossyScale）。</summary>
+    public string probe_face_size()
+    {
+        if (gameObject_face == null)
+        {
+            return "none";
+        }
+        Vector3 s = gameObject_face.transform.lossyScale;
+        return ((int)Math.Round(Math.Abs(s.x) * 100f)) + ","
+             + ((int)Math.Round(Math.Abs(s.y) * 100f));
+    }
+
     private void RefreshFunction_ES()
     {
-        if (Program.InputGetMouseButtonUp_0 && ES_mouse_check())
+        // ⛔ RD 极大怪兽的 L/R 部件**不接受点击**：它们是一体的部件在本体左右的常显，
+        //   既不是可选对象、也不该被「确认」（用户 2026-09-22：别再让玩家确认这两张）。
+        //   悬停看效果不受影响 —— 那条路走 ES_enter_excited → showMeLeft，不经过这里。
+        //   （本处是 ES_cardClicked 在全局唯一的调用点，在这里拦下就再无入口。）
+        if (Program.InputGetMouseButtonUp_0 && ES_mouse_check() && !isRdMaximumPiece())
         {
             Program.I().ocgcore.ES_cardClicked(this);
         }
@@ -610,7 +841,9 @@ public class gameCard : OCGobject
 
         if (condition == gameCardCondition.floating_clickable)
         {
-            Vector3 vector_of_begin = gameObject_face.transform.position + new Vector3(0, 1, 1.732f);
+            // 按钮行的**锚点**也在「卡面上方」：同样收进 `Program.cardUpOffset`
+            // （俯视角下换成世界 +z、长度 2h），否则整排按钮会压到卡面上。
+            Vector3 vector_of_begin = gameObject_face.transform.position + Program.cardUpOffset(1f, faceHalfWorld());
             vector_of_begin = Program.camera_game_main.WorldToScreenPoint(vector_of_begin);
             for (int i = 0; i < buttons.Count; i++)
             {
@@ -643,7 +876,9 @@ public class gameCard : OCGobject
                 float h = loaded_verticalDrawingK * 0.618f;
                 Vector3 vector_of_begin = Vector3.zero;
                 float l = (0.5f * game_object_verticle_drawing.transform.localScale.y * (h - 0.5f));
-                vector_of_begin = game_object_verticle_drawing.transform.position + new Vector3(0, l, l * 1.732f);
+                // 展示图上方的按钮行锚点：偏移是「竖着立起 l」的世界长度 —— 收进 `cardUpOffsetLen`
+                // （俯视角展示图被压平，世界 +y 分量屏上位移为 0，照搬会让按钮行压到图上）。
+                vector_of_begin = game_object_verticle_drawing.transform.position + Program.cardUpOffsetLen(2f * l);
                 vector_of_begin = Program.camera_game_main.WorldToScreenPoint(vector_of_begin);
                 for (int i = 0; i < buttons.Count; i++)
                 {
@@ -683,26 +918,46 @@ public class gameCard : OCGobject
         if (condition == gameCardCondition.floating_clickable)
         {
             flash_line_on();
-            iTween.RotateTo(gameObject, new Vector3(-30, 0, 0), 0.3f);
+            // ⛔ RD 极大怪兽的 L/R 部件**不做**这个「抬起来朝向镜头」的旋转（用户 2026-09-23
+            //   第 6 轮：「查看极大怪兽的lr部件时不像正常的查看怪兽那样放大，而是有点像查看
+            //    盖放在魔陷区的卡一样会旋转一下，我希望不要这样」）。部件平躺在场上，悬停时
+            //   只走下面的 close-up 拉近放大（正常怪兽 verticle_clickable 的查看方式）+ 左侧
+            //   卡片说明，不再旋转。OCG 的超量素材照旧 —— 它们本来就要拉出来摆到 -30 斜看。
+            //   （俯视角下 tableauAngle(-30)=0 本来就是无操作，这条只在 60° 视角起作用。）
+            if (!isRdMaximumPiece())
+            {
+                // 「抬起来朝向镜头」—— 俯视角下镜头在天顶，「朝向镜头」就是**平铺**，
+                // 所以这个角度走 Program.tableauAngle（关态原样 -30，一个像素不变）。
+                iTween.RotateTo(gameObject, new Vector3(Program.tableauAngle(-30f), 0, 0), 0.3f);
+            }
         }
         ES_excited_unsafe_should_not_be_changed_dont_touch_this = true;
         showMeLeft(true);
-        List<gameCard> overlayed_cards = Program.I().ocgcore.GCS_cardGetOverlayElements(this);
-        Vector3 screen = Program.camera_game_main.WorldToScreenPoint(gameObject.transform.position);
-        screen.z = 0;
-        float k = ((float)Screen.height) / 700f;
-        for (int x = 0; x < overlayed_cards.Count; x++)
+
+        // ⛔ RD 极大怪兽不做「把素材拉出来看」那一套（用户 2026-09-22 明确不要）：
+        //   它的 L/R 是按**原格位**常显在本体左右的部件（见 Ocgcore.maximumPieceWorldPosition），
+        //   本来就不「叠在父卡身上」，再拉一次就成了「两张部件从场上下来、摊在旁边」——
+        //   玩家看到的是「像确认墓地/卡组、像检查超量素材」那种观感。
+        //   OCG 的素材照旧（这里是 OCG 悬停查看素材的入口之一），一个像素不变。
+        if (!isRdMaximumCard())
         {
-            if (overlayed_cards[x].isShowed == false)
+            List<gameCard> overlayed_cards = Program.I().ocgcore.GCS_cardGetOverlayElements(this);
+            Vector3 screen = Program.camera_game_main.WorldToScreenPoint(gameObject.transform.position);
+            screen.z = 0;
+            float k = ((float)Screen.height) / 700f;
+            for (int x = 0; x < overlayed_cards.Count; x++)
             {
-                float pianyi = 130f;
-                if (Program.getVerticalTransparency() < 0.5f)
+                if (overlayed_cards[x].isShowed == false)
                 {
-                    pianyi =90f;
+                    float pianyi = 130f;
+                    if (Program.getVerticalTransparency() < 0.5f)
+                    {
+                        pianyi =90f;
+                    }
+                    Vector3 screen_vector_to_move = screen + new Vector3(pianyi * k + 60f * k * (overlayed_cards.Count - overlayed_cards[x].p.position - 1), 0, 12f + 2f * (overlayed_cards.Count - overlayed_cards[x].p.position - 1));
+                    overlayed_cards[x].flash_line_on();
+                    overlayed_cards[x].TweenTo(Camera.main.ScreenToWorldPoint(screen_vector_to_move), new Vector3(Program.tableauAngle(-30f), 0, 0),true);
                 }
-                Vector3 screen_vector_to_move = screen + new Vector3(pianyi * k + 60f * k * (overlayed_cards.Count - overlayed_cards[x].p.position - 1), 0, 12f + 2f * (overlayed_cards.Count - overlayed_cards[x].p.position - 1));
-                overlayed_cards[x].flash_line_on();
-                overlayed_cards[x].TweenTo(Camera.main.ScreenToWorldPoint(screen_vector_to_move), new Vector3(-30, 0, 0),true);
             }
         }
     }
@@ -780,10 +1035,46 @@ public class gameCard : OCGobject
         gived_rotation = r;
     }
 
+    /// <summary>
+    /// 手牌 / 展示行的**放大倍数**（俯视角专用，倍数由 `Program.tableauHandScale` 算）。
+    ///
+    /// 只碰「自己放大过的那张卡」（<see cref="handRowScaled"/>）—— 与 `rdMaxTrioScaled` 同一个
+    /// 教训：卡根的 scale 有自己的创建动画，无脑每帧写就会把它踩掉。关态恒传 1
+    /// ⇒ 只会「还原自己改过的」，对别的卡一次写入都不发生（逐字段等价于旧实现）。
+    /// ⚠ 不走 `UA_flush_all_gived_witn_lock`：那里只 tween 位置/角度，scale 直接写更稳。
+    /// </summary>
+    public void UA_give_scale(float s)
+    {
+        if (s != 1f)
+        {
+            gameObject.transform.localScale = new Vector3(s, s, s);
+            handRowScaled = true;
+        }
+        else if (handRowScaled)
+        {
+            gameObject.transform.localScale = Vector3.one;
+            handRowScaled = false;
+        }
+    }
+
+    /// <summary>卡根的 scale 是否被手牌排放大改过 —— 只有改过才由 `UA_give_scale(1)` 还原。</summary>
+    public bool handRowScaled = false;
+
     public void UA_flush_all_gived_witn_lock(bool rush)
     {
         if (Vector3.Distance(gived_position, accurate_position) > 0.001f || Vector3.Distance(gived_rotation, accurate_rotation) > 0.001f)
         {
+            if (QuickTestTrace.Enabled && isRdMaximumCard())
+            {
+                // 排查用：极大怪兽（本体/部件）每一次真实摆位都落一行。
+                // 「先下去→弹回来→又下去」这类三段动画的第一现场就在这里：
+                // 看相邻两行的 giv 交替就能定位是谁把卡摆了两次。
+                QuickTestTrace.Log("maxmv", "flush id=" + data.Id
+                    + " loc=0x" + p.location.ToString("X") + " seq=" + p.sequence
+                    + " ctrl=" + p.controller + " rush=" + (rush ? "1" : "0")
+                    + " acc=(" + accurate_position.x.ToString("F0") + "," + accurate_position.y.ToString("F0") + "," + accurate_position.z.ToString("F0") + ")"
+                    + " giv=(" + gived_position.x.ToString("F0") + "," + gived_position.y.ToString("F0") + "," + gived_position.z.ToString("F0") + ")");
+            }
             float time = 0.25f;
             time += Vector3.Distance(gived_position, gameObject.transform.position) * 0.05f / 20f;
             ES_lock(time+0.1f);
@@ -943,12 +1234,12 @@ public class gameCard : OCGobject
                 if ((p.position & (UInt32)CardPosition.Attack) > 0)
                 {
                     cardHint.gameObject.transform.localPosition = new Vector3(0, 0, -2.5f);
-                    cardHint.gameObject.transform.localEulerAngles = new Vector3(60, 0, 0);
+                    cardHint.gameObject.transform.localEulerAngles = new Vector3(Program.tableauFrontX, 0, 0);
                 }
                 else
                 {
                     cardHint.gameObject.transform.localPosition = new Vector3(-2.5f, 0, 0);
-                    cardHint.gameObject.transform.localEulerAngles = new Vector3(60, 90, 0);
+                    cardHint.gameObject.transform.localEulerAngles = new Vector3(Program.tableauFrontX, 90, 0);
                 }
             }
             else
@@ -956,12 +1247,12 @@ public class gameCard : OCGobject
                 if ((p.position & (UInt32)CardPosition.Attack) > 0)
                 {
                     cardHint.gameObject.transform.localPosition = new Vector3(0, 0, 2.5f);
-                    cardHint.gameObject.transform.localEulerAngles = new Vector3(40, 180, 0);
+                    cardHint.gameObject.transform.localEulerAngles = new Vector3(Program.tableauFrontX - 20f, 180, 0);
                 }
                 else
                 {
                     cardHint.gameObject.transform.localPosition = new Vector3(2.5f, 0, 0);
-                    cardHint.gameObject.transform.localEulerAngles = new Vector3(40, -90, 0);
+                    cardHint.gameObject.transform.localEulerAngles = new Vector3(Program.tableauFrontX - 20f, -90, 0);
                 }
             }
         }
@@ -1177,6 +1468,7 @@ public class gameCard : OCGobject
     }
     int loaded_verticalDrawingCode = -1;
     bool loaded_verticalDrawingReal = false;
+    bool loaded_verticalDrawingSingle = false;
     float loaded_verticalDrawingK = 1;
    // bool picLikeASquare = false;
     int loaded_verticalDrawingNumber = -1;
@@ -1184,6 +1476,10 @@ public class gameCard : OCGobject
     int loaded_verticaldef = -1;
     int loaded_verticalpos = -1;
     int loaded_verticalcon = -1;
+    /// <summary>上一帧的「极大模式」档（1 = 本体名下挂着 L/R 素材）。为什么要单独缓存：
+    /// 素材收走/散伙不一定带动攻守或位置变化，不进脏检查的话「极大状态一变」就不会重写文字。
+    /// 判据见 card_verticle_drawing_handler 里那段注释。</summary>
+    int loaded_verticalmaxstate = -1;
     int loaded_verticalColor = -1;
     int loaded_verticalOverAttribute = -1;
     float k_verticle = 1;
@@ -1191,19 +1487,32 @@ public class gameCard : OCGobject
     public bool opMonsterWithBackGroundCard=false;    
     void card_verticle_drawing_handler()
     {
-        if (game_object_verticle_drawing == null || loaded_verticalDrawingCode != data.Id || loaded_verticalDrawingReal != Program.getVerticalTransparency() > 0.5f)
+        // 🔑 RD 极大怪兽**本体**的立绘两态（用户 2026-09-24 晚报「中间件单独召唤显示极大立绘」）：
+        //   挂着 L/R 素材（极大状态）= 宽幅极大立绘（closeup/{code}.png，~970 宽）；
+        //   单独在场（素材数 0）= 单体立绘（closeup/{code}_2.png，512 方图，资源 2026-09-19 已铺、
+        //   此前代码从未读）。L/R 部件与普通卡不满足 isRdMaximumCard ⇒ 恒走常规档；
+        //   OCG 侧 isRdMaximumCard() 恒 false，零影响。缺 _2 资源时纹理层回落 {code}.png。
+        //   ⚠ 单体态必须进脏检查（素材收编/散伙不带动 data.Id 变化），同 loaded_verticalmaxstate 的教训。
+        bool singleDrawing = isRdMaximumCard()
+            && Program.I().ocgcore.GCS_cardGetOverlayCount(this) == 0;
+        GameTextureType drawingType = singleDrawing
+            ? GameTextureType.card_verticle_drawing_single
+            : GameTextureType.card_verticle_drawing;
+        if (game_object_verticle_drawing == null || loaded_verticalDrawingCode != data.Id || loaded_verticalDrawingReal != Program.getVerticalTransparency() > 0.5f
+            || loaded_verticalDrawingSingle != singleDrawing)
         {
             if (Program.getVerticalTransparency() > 0.5f)
             {
-                Texture2D texture = GameTextureManager.get(data.Id, GameTextureType.card_verticle_drawing);
+                Texture2D texture = GameTextureManager.get(data.Id, drawingType);
                 if (texture != null)
                 {
                     loaded_verticalDrawingCode = data.Id;
-                    loaded_verticalDrawingK = GameTextureManager.getK(data.Id, GameTextureType.card_verticle_drawing);
+                    loaded_verticalDrawingSingle = singleDrawing;
+                    loaded_verticalDrawingK = GameTextureManager.getK(data.Id, drawingType);
                    // picLikeASquare = GameTextureManager.getB(data.Id, GameTextureType.card_verticle_drawing);
                     if (game_object_verticle_drawing == null)
                     {
-                        game_object_verticle_drawing = create(Program.I().mod_simple_quad, gameObject.transform.position, new Vector3(60, 0, 0));
+                        game_object_verticle_drawing = create(Program.I().mod_simple_quad, gameObject.transform.position, new Vector3(Program.tableauFrontX, 0, 0));
                         VerticleTransparency = 1f;
                     }
                     if (loaded_verticalDrawingReal != Program.getVerticalTransparency() > 0.5f)
@@ -1223,7 +1532,7 @@ public class gameCard : OCGobject
                // picLikeASquare = true;
                 if (game_object_verticle_drawing == null)
                 {
-                    game_object_verticle_drawing = create(Program.I().mod_simple_quad, gameObject.transform.position, new Vector3(60, 0, 0));
+                    game_object_verticle_drawing = create(Program.I().mod_simple_quad, gameObject.transform.position, new Vector3(Program.tableauFrontX, 0, 0));
                     VerticleTransparency = 1f;
                 }
                 if (loaded_verticalDrawingReal != Program.getVerticalTransparency() > 0.5f)
@@ -1321,11 +1630,11 @@ public class gameCard : OCGobject
                 loaded_verticalColor = color;
                 if (verticle_number == null)
                 {
-                    verticle_number = create(Program.I().new_ui_textMesh, Vector3.zero, new Vector3(60, 0, 0), true, null, true, new Vector3(3 * 1.8f * 0.04f, 3 * 1.8f * 0.04f, 3 * 1.8f * 0.04f)).GetComponent<TMPro.TextMeshPro>();
+                    verticle_number = create(Program.I().new_ui_textMesh, Vector3.zero, new Vector3(Program.tableauFrontX, 0, 0), true, null, true, new Vector3(3 * 1.8f * 0.04f, 3 * 1.8f * 0.04f, 3 * 1.8f * 0.04f)).GetComponent<TMPro.TextMeshPro>();
                 }
                 if (game_object_verticle_Star == null)
                 {
-                    game_object_verticle_Star = create(Program.I().mod_simple_quad, Vector3.zero, new Vector3(60, 0, 0), true, null, true, new Vector3(3 * 1.8f * 0.17f, 3 * 1.8f * 0.17f, 3 * 1.8f * 0.17f));
+                    game_object_verticle_Star = create(Program.I().mod_simple_quad, Vector3.zero, new Vector3(Program.tableauFrontX, 0, 0), true, null, true, new Vector3(3 * 1.8f * 0.17f, 3 * 1.8f * 0.17f, 3 * 1.8f * 0.17f));
                 }
                 if (color == 0)
                 {
@@ -1367,24 +1676,40 @@ public class gameCard : OCGobject
             else
             {
                 Vector3 screen_number_pos;
-                screen_number_pos = Program.camera_game_main.WorldToScreenPoint(cardHint.gameObject.transform.position + new Vector3(-0.61f, 0.65f, 0.65f * 1.732f));
+                // 「卡面上方」的精调偏移收进 `cardUpOffsetLen`（up 分量长度 1.3 = |(0, 0.65, 0.65·1.732)|）：
+                // 俯视角照搬世界 +y 分量的屏上位移是 0，等级数字/星标会掉进展示图里。
+                screen_number_pos = Program.camera_game_main.WorldToScreenPoint(cardHint.gameObject.transform.position
+                    + new Vector3(-0.61f, 0f, 0f) + Program.cardUpOffsetLen(1.3f));
                 screen_number_pos.z -= 2f;
                 verticle_number.transform.position = Program.camera_game_main.ScreenToWorldPoint(screen_number_pos);
                 if (game_object_verticle_Star != null)
                 {
-                    screen_number_pos = Program.camera_game_main.WorldToScreenPoint(cardHint.gameObject.transform.position + new Vector3(-1.86f, 0.65f, 0.65f * 1.732f));
+                    screen_number_pos = Program.camera_game_main.WorldToScreenPoint(cardHint.gameObject.transform.position
+                        + new Vector3(-1.86f, 0f, 0f) + Program.cardUpOffsetLen(1.3f));
                     screen_number_pos.z -= 2f;
                     game_object_verticle_Star.transform.position = Program.camera_game_main.ScreenToWorldPoint(screen_number_pos);
                 }
             }
 
-            if (loaded_verticalatk != data.Attack || loaded_verticaldef != data.Defense  || loaded_verticalpos!=p.position|| loaded_verticalcon!=p.controller)
+            // 🔑 RD 极大怪兽「极大模式」下不显示守备力（用户 2026-09-22）。
+            //    极大状态 = 本体名下挂着 L/R 素材（core 口径 RushDuel.MaximumMode =
+            //    EFFECT_MAXIMUM_MODE && GetOverlayCount()>0；客户端能看到的对应物就是
+            //    「本体是 RD 极大卡且素材数 > 0」）。此时卡面只写攻击力 —— 守备位在
+            //    极大形态里恒 0、也没有意义。素材散伙/离场 ⇒ 计数归零、本档翻回，
+            //    攻/守照旧显示。OCG 侧 isRdMaximumCard() 恒 false，一个字符都不变。
+            //    ⚠ 极大状态必须进脏检查（素材数变化不一定带动攻守/位置变化），
+            //      所以单独缓存 loaded_verticalmaxstate。
+            int maxState = (isRdMaximumCard()
+                            && Program.I().ocgcore.GCS_cardGetOverlayCount(this) > 0) ? 1 : 0;
+            if (loaded_verticalatk != data.Attack || loaded_verticaldef != data.Defense  || loaded_verticalpos!=p.position|| loaded_verticalcon!=p.controller
+                || loaded_verticalmaxstate != maxState)
             {
                 loaded_verticalatk = data.Attack;
                 loaded_verticaldef = data.Defense;
                 loaded_verticalpos = p.position;
                 loaded_verticalcon = (int)p.controller;
-                if ((data.Type&(uint)CardType.Link)>0)   
+                loaded_verticalmaxstate = maxState;
+                if ((data.Type&(uint)CardType.Link)>0)
                 {
                     string raw = "";
                     YGOSharp.Card data_raw = YGOSharp.CardsManager.Get(data.Id);
@@ -1424,8 +1749,11 @@ public class gameCard : OCGobject
                         {
                             raw += data.Attack.ToString();
                         }
-                        raw += "/";
-                        raw += "<#888888>" + data.Defense.ToString() + "</color>";
+                        if (maxState == 0)
+                        {
+                            raw += "/";
+                            raw += "<#888888>" + data.Defense.ToString() + "</color>";
+                        }
                         if (p.sequence == 5 || p.sequence == 6)
                         {
                             raw += "(" + (p.controller == 0 ? GameStringHelper._wofang : GameStringHelper._duifang) + ")";
@@ -1435,18 +1763,21 @@ public class gameCard : OCGobject
                     else
                     {
                         raw += "<#888888>" + data.Attack.ToString() + "</color>";
-                        raw += "/";
-                        if (data.Defense > data_raw.Defense)
+                        if (maxState == 0)
                         {
-                            raw += "<#7fff00>" + data.Defense.ToString() + "</color>";
-                        }
-                        if (data.Defense < data_raw.Defense)
-                        {
-                            raw += "<#dda0dd>" + data.Defense.ToString() + "</color>";
-                        }
-                        if (data.Defense == data_raw.Defense)
-                        {
-                            raw += data.Defense.ToString();
+                            raw += "/";
+                            if (data.Defense > data_raw.Defense)
+                            {
+                                raw += "<#7fff00>" + data.Defense.ToString() + "</color>";
+                            }
+                            if (data.Defense < data_raw.Defense)
+                            {
+                                raw += "<#dda0dd>" + data.Defense.ToString() + "</color>";
+                            }
+                            if (data.Defense == data_raw.Defense)
+                            {
+                                raw += data.Defense.ToString();
+                            }
                         }
                         if (p.sequence == 5 || p.sequence == 6)
                         {
@@ -1455,7 +1786,7 @@ public class gameCard : OCGobject
                         set_text(raw.Replace("-2", "?"));
                     }
                 }
-               
+
 
             }
         }
@@ -1792,6 +2123,15 @@ public class gameCard : OCGobject
         cardHint.text = s;
     }
 
+    /// <summary>
+    /// 卡面上那串「ATK/DEF」文本原文（含颜色标记），只给 `_verify_rdai_game.py` 的
+    /// `[max]` 探针读 —— 判断「显示不对」是没推过来还是推过来没画上去，只能看这串。
+    /// </summary>
+    public string probe_hint_text
+    {
+        get { return cardHint == null ? "" : cardHint.text; }
+    }
+
     private int get_color_num_int()
     {
         int re = 0;
@@ -1875,7 +2215,7 @@ public class gameCard : OCGobject
                 obj_number.transform.GetComponent<TMPro.TextMeshPro>().text = number.ToString();
                 obj_number.transform.localScale = Vector3.zero;
                 iTween.ScaleTo(obj_number, new Vector3(1, 1, 1), 0.3f);
-                iTween.RotateTo(obj_number, new Vector3(60, 0, 0), 0.3f);
+                iTween.RotateTo(obj_number, new Vector3(Program.tableauFrontX, 0, 0), 0.3f);
             }
             else if (number_showing != number)
             {
@@ -1885,7 +2225,7 @@ public class gameCard : OCGobject
                 obj_number.transform.GetComponent<TMPro.TextMeshPro>().text = number.ToString();
                 obj_number.transform.localScale = Vector3.zero;
                 iTween.ScaleTo(obj_number, new Vector3(1, 1, 1), 0.3f);
-                iTween.RotateTo(obj_number, new Vector3(60, 0, 0), 0.3f);
+                iTween.RotateTo(obj_number, new Vector3(Program.tableauFrontX, 0, 0), 0.3f);
             }
         }
         number_showing = number;
@@ -2053,6 +2393,71 @@ public class gameCard : OCGobject
     #region overlay
 
     List<GameObject> overlay_lights = new List<GameObject>();
+
+    /// <summary>
+    /// 超量素材光点相对卡面的**世界偏移**。⛔⛔ 必须跟视角走，原来写死的是「世界正上方
+    /// <c>(0, 1.8, 0)</c>」：
+    /// ・60° 斜视角下世界 +y 在**屏幕上也是向上** ⇒ 光点浮在卡面之上（正常，就是用户说的
+    ///   「像斜视角一样正常处于卡牌之上」）；
+    /// ・正俯视（tilt 90）下世界 +y 是**朝相机的方向**、屏幕位移恰好为 0 ⇒ 光点与卡面完全重叠
+    ///   —— 用户 2026-09-23 实测：「俯视角下卡牌上的光点没有像斜视角一样正常处于卡牌之上，
+    ///   变成在卡牌中间了」。
+    /// 定稿：俯视角下改用**垂直于视线**的那个方向（= 屏幕上方）= 世界 **+z**。
+    /// ⛔ 方向不靠猜：`[view] proj` 实测投影标尺（`log/qt_*.log`）量得很清楚 ——
+    ///   地面 z 越大、屏幕 y（自上而下计）越小，且 20.3 px/世界 ⇒ **+z 就是屏幕上方**。
+    /// 长度仍是 1.8 ⇒ 屏上约 36.5 px，与斜视角那 0.9 世界（≈18px）同一量级观感。
+    /// ⚠ 关态逐字节不变：仍然是 <c>(0, 1.8, 0)</c>。
+    /// 提成静态量是为了让探针**只咬一处**（`[view] oloff` 直接投影它，判据不在脚本里重抄公式）。
+    /// </summary>
+    public static Vector3 overlayLightOffset
+    {
+        get { return Program.topDown ? new Vector3(0f, 0f, 1.8f) : new Vector3(0f, 1.8f, 0f); }
+    }
+
+    /// <summary>
+    /// 探针用：把「卡面上方 h」的偏移与「卡片自己的半高」各投到屏幕上，回两个**像素长度之比**。
+    ///
+    /// 这个比值**与视角无关**（两者沿同一个世界方向、同一个投影缩放，见 `Program.cardUpOffset` 的注释），
+    /// 所以「关态比值 == 开态比值」就是「卡上闪光在两个视角里处在卡面的同一位置」的等价说法 ——
+    /// 探针 `[cardup]` 咬它（用户 2026-09-23：「没有像斜视角一样正常处于卡牌之上，变成在卡牌中间」）。
+    /// </summary>
+    public bool upOffsetPixelRatio(float h, out float ratio, out string diag)
+    {
+        ratio = -1f;
+        diag = "";
+        try
+        {
+            Transform f = gameObject_face.transform;
+            Renderer rd = gameObject_face.GetComponent<Renderer>();
+            if (rd == null || f == null)
+            {
+                return false;
+            }
+            Vector3 up = f.up;
+            Bounds b = rd.bounds;
+            // 卡片沿「自己的上方向」的半长（世界 AABB 在该方向上的支撑半径）
+            float half = Mathf.Abs(up.x) * b.extents.x + Mathf.Abs(up.y) * b.extents.y + Mathf.Abs(up.z) * b.extents.z;
+            Camera cam = Program.camera_game_main;
+            Vector3 p0 = cam.WorldToScreenPoint(f.position);
+            Vector3 p1 = cam.WorldToScreenPoint(f.position + up * half);
+            Vector3 p2 = cam.WorldToScreenPoint(f.position + Program.cardUpOffset(h, half));
+            float halfPx = new Vector2(p1.x - p0.x, p1.y - p0.y).magnitude;
+            float upPx = new Vector2(p2.x - p0.x, p2.y - p0.y).magnitude;
+            if (halfPx < 0.5f)
+            {
+                return false;
+            }
+            ratio = upPx / halfPx;
+            diag = " up=(" + up.x.ToString("F2") + "," + up.y.ToString("F2") + "," + up.z.ToString("F2") + ")"
+                + " half=" + half.ToString("F2")
+                + " upPx=" + Mathf.RoundToInt(upPx) + " halfPx=" + Mathf.RoundToInt(halfPx);
+            return true;
+        }
+        catch (System.Exception)
+        {
+            return false;
+        }
+    }
 
     public void add_one_overlay_light()
     {
@@ -2760,4 +3165,54 @@ public class gameCard : OCGobject
 
     public GPS p_beforeOverLayed;
     public int overFatherCount;
+
+    /// <summary>
+    /// 这张卡现在是不是被我按「极大怪兽大框」的倍率放大着（见
+    /// <c>Ocgcore.realize</c> 里的 <c>RdMaximumTrioScale</c> 那一段）。
+    ///
+    /// 为什么要记一个标记、而不是每帧无脑写 scale：卡根的 scale 有自己的动画
+    /// （创建时置零、随后由别人收到 1）。无脑写就会把那套动画踩掉 ⇒ **只碰我自己改过的卡**，
+    /// 一旦它不再是三件之一（本体被打掉 / 撤回重开 / 送回卡组），立刻还原成 1。
+    /// </summary>
+    public bool rdMaxTrioScaled = false;
+
+    /// <summary>
+    /// 这张卡正被「RD 极限召唤三件同帧入场」的暂存按住（见 <c>Ocgcore.rdMaxApplyStageHold</c>）。
+    ///
+    /// 为什么要按：极限召唤的三张卡是**三条独立 MOVE** 送来的，每条都走 `TweenTo` 补间
+    /// ⇒ 一前一后飞进场，看着像三次独立召唤。实测（log/qt_6128.log，我方那次）：
+    ///   18.805 L(120150001) hand→MZ seq1 ｜ 18.946 R(120150003) hand→MZ seq3
+    ///   19.125 L → Overlay ｜ 19.126 本体(120150002) hand→MZ seq2 ｜ 19.128 R → Overlay
+    /// 现在把先到的部件按在原处，等本体那一条 MOVE 进来的**同一帧**一起放行 ⇒ 三张卡
+    /// 从同一处、同一时长飞出去，同时落位（大框也是那一帧亮）。
+    /// </summary>
+    public bool rdMaxHeld = false;
+
+    /// <summary>
+    /// 按住：位置钉死在 <paramref name="keepAt"/>（snap，不起补间），并缩到不可见。
+    ///
+    /// ⚠ 缩到不可见而不是「留在原地不动」：此刻它已经不在手牌那一摞里了（`p.location`
+    ///   是怪兽区），留在原地就是两张卡悬在手牌行上不动 —— 正是用户 2026-09-22 截图里
+    ///   骂过的「悬浮在场地中间的两张卡」。缩到 0.001 视觉上等于没有，放行时 `UA_rdMaxRelease`
+    ///   还原成 1（三件齐就立刻被 `applyRdMaximumTrioScale` 改成 1.45）。
+    /// ⚠ 位置必须**每帧重钉**：卡根的 scale 有自己的创建动画，位置也可能被别的补间盯上。
+    /// </summary>
+    public void UA_rdMaxHold(Vector3 keepAt)
+    {
+        UA_give_position(keepAt);
+        UA_flush_all_gived_witn_lock(true);     // rush ⇒ clearITWeen + 直接赋值，不飞
+        rdMaxHeld = true;
+        gameObject.transform.localScale = new Vector3(0.001f, 0.001f, 0.001f);
+    }
+
+    /// <summary>放行：清标记 + 还原成 1。位置由紧随其后的 `realize` 摆位循环给（于是三张同帧起飞）。</summary>
+    public void UA_rdMaxRelease()
+    {
+        if (!rdMaxHeld)
+        {
+            return;
+        }
+        rdMaxHeld = false;
+        gameObject.transform.localScale = Vector3.one;
+    }
 }

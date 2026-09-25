@@ -4,7 +4,7 @@
 RD（超速决斗）数据分发脚本 —— 把外部参考包展开成客户端运行目录下的 rd/ 布局。
 
 ⚠ 版本控制：本文件是**权威版**，随 `feature/rush-duel` 分支入库。
-  早期副本在 `D:\\Game\\试行pro2\\_unpack_rd.py`（那个目录不是 git 仓库）；今后改动以本文件为准。
+  早期副本在工作区根下的 `_unpack_rd.py`（那个目录不是 git 仓库）；今后改动以本文件为准。
   源包与 rd/ 数据本身**不入 git**（合计 1.6 GB+），清单与 MD5 见同目录 `rd_data_layout.md`。
 
 背景：
@@ -57,7 +57,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))          # <仓库>/devtools
 REPO = os.path.dirname(HERE)                               # <仓库> = YGOProUnity_V2
-WORKSPACE = os.path.dirname(REPO)                          # 工作区 = D:/Game/试行pro2
+WORKSPACE = os.path.dirname(REPO)                          # 工作区 = 仓库的上一级目录
 DEFAULT_SRC = os.path.join(WORKSPACE, "参考内容", "RD")
 DEFAULT_DEST = os.path.join(REPO, "output", "Windows")
 
@@ -104,6 +104,25 @@ RD_CORE_SCRIPTS = ["constant.lua", "procedure.lua", "utility.lua"]
 # self_table/self_code 上下文里跑，内联后一模一样。
 ALT_CARD_RE = re.compile(r"RD\.AlternateCard\s*\(\s*(\d+)\s*\)")
 ALT_CARD_MAX_DEPTH = 4
+
+# ---------- ⛔⛔ 这里曾经有一张「摘掉 EFFECT_FLAG_SINGLE_RANGE」的补丁表，已删除 ----------
+# 2026-09-22 教训（**别再重新加回来**）：当时观察到「极大召唤后攻击力停在卡面原始值
+# 1900」，就断定本 core 把带 EFFECT_FLAG_SINGLE_RANGE 的效果判成不可用，于是往
+# RDMaximum.lua 的 103 那条抄了个「摘掉该 flag」的补丁，还写了一版 strip_single_range.py
+# 打算批量摘 RD 侧 67 处、并推算出 OCG 侧 499 处「同样会失效」。
+#
+# 全部是误判。真凶是**造局探针少给了 enable 参数**：
+#   libduel.cpp:872 `Duel.MoveToField(..., enable, ...)` 的第 6 参决定 move_to_field 之后
+#   是否 `enable_field_effect(true)`。探针给 false ⇒ 卡的 STATUS_EFFECT_ENABLED 一直不置位
+#   ⇒ effect.cpp:65 `is_flag(SINGLE_RANGE) && !phandler->get_status(STATUS_EFFECT_ENABLED)`
+#   把 103 判成不可用。真实游戏里本体走 AddHandSpecialSummonProcedure → SpecialSummon
+#   （召唤路径自带 enable），所以玩家自己召唤从来就是 3500。
+# 铁证：同一张卡、同一位置、**同一份原生 lua（带 SINGLE_RANGE）**，只把探针第 6 参
+# false→true，atk 立刻 1900→3500（_verify_rdai_game.py --max 的 6k1/6k2/6k3）。
+#
+# ⇒ SINGLE_RANGE 与 ocgcore.dll 都没有缺陷，任何「摘 flag」式的补丁都是纯粹的危害：
+#   该 flag 在 core 里还兼着「作用范围限本卡 + 里侧/未启用时不生效」的语义，
+#   摘掉会让效果在它本不该生效的场合生效。规则库保持与上游逐字一致。
 
 # 兼容层源码（入 git）。生成时把它的 @@RD_LIBS_HERE@@ 换成 RD 规则库源码，
 # 再追加到 RD 版 utility.lua 末尾。
@@ -393,6 +412,9 @@ def build_ai_package(client, src_dir, dest, force):
     missing += [n for n in (CLIENT_SPECIAL,) if n not in lib_text]
     if missing:
         return "客户端脚本目录里缺这些文件：%s" % "、".join(missing)
+
+    # 规则库**不做任何改写**，逐字铺上游原文。历史教训见本文件顶部
+    #「这里曾经有一张摘掉 EFFECT_FLAG_SINGLE_RANGE 的补丁表」那段注释。
 
     # 规则库原样铺一份留档（便于与内联结果比对），utility/special 另写。
     n_lib = 0
@@ -689,7 +711,9 @@ def main():
     # ---------- 5. 来源自述（排查用） ----------
     with open(os.path.join(args.dest, "rd", "rd_source.txt"), "w", encoding="utf-8") as f:
         f.write("RD 数据分发自述（由 devtools/unpack_rd.py 生成）\n")
-        f.write("源目录: %s\n" % src_dir)
+        # ⛔ 只写目录名，**不许写 src_dir 绝对路径**：这份自述会随成品包一起分发，
+        #    绝对路径会暴露作者机器的目录结构（2026-09-23 发布审计抓到的实漏）。
+        f.write("源目录: %s\n" % os.path.basename(os.path.normpath(src_dir)))
         for src_name, member, out_name in CDBS:
             f.write("  %s ! %s -> rd/cdb/%s\n" % (src_name, member, out_name))
         f.write("  %s ! %s -> rd/lflist.conf\n" % (LFLIST_ZIP, LFLIST_MEMBER))

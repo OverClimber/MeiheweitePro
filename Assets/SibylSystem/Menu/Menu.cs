@@ -138,6 +138,34 @@ public class Menu : WindowServantSP
     private UISprite rdChipPlate;
     private UILabel rdChipLabel;
 
+    // ==================== 「支持作者」按钮（最右下角，点击跳转爱发电）====================
+
+    private const string SponsorNode = "sponsor";
+    private const string SponsorButton = "sponsor_";
+
+    /// <summary>点击「支持作者」要打开的爱发电主页。</summary>
+    private const string SponsorUrl = "https://afdian.com/a/MeiheweitePro";
+
+    /// <summary>
+    /// 贴角余量（根坐标系局部单位，1 单位 ≈ Screen.height/700 px）：按钮**中心**到屏幕
+    /// 右/下边的距离。x 向 = 文字半宽（「支持作者」≈40）+ 10；y 向 = 文字半高（≈17）+ 7。
+    /// 用户 2026-09-24 定稿：「在页面的最右下角」——文字要贴到角上，余量只留一线
+    /// （按钮碰撞盒 180×50×0.62 会探出屏幕边缘几 px，NGUI 拾取不受影响，且裁剪区已放宽）。
+    /// </summary>
+    private const float SponsorEdgeMarginX = 50f;
+    private const float SponsorEdgeMarginY = 24f;
+
+    /// <summary>
+    /// 「支持作者」在主菜单根坐标系里的落点：**最右下角**，按当前窗口宽高比现算 ——
+    /// 根坐标系满屏高 700（±350），满屏宽 700×aspect。每帧重算（PinSponsor），
+    /// 窗口一拉大按钮就跟着贴到新的角上。口径仍是「菜单动、按钮不动」。
+    /// </summary>
+    private static Vector2 SponsorPos()
+    {
+        float aspect = Screen.height > 0 ? (float)Screen.width / Screen.height : (16f / 9f);
+        return new Vector2(350f * aspect - SponsorEdgeMarginX, -350f + SponsorEdgeMarginY);
+    }
+
     /// <summary>
     /// <see cref="FitMenuBack"/> 算出来的**静态**裁剪区（模板面板 + 徽标落点常量）。
     /// 每帧的芯片跟随只在这条基线上做并集，绝不就地累加 —— 面板回到正位后裁剪区要能自己收回去。
@@ -196,6 +224,7 @@ public class Menu : WindowServantSP
         CreateExitMenuItem();
         CreateRdUpdateMenuItem();
         CreateRdChip();
+        CreateSponsorButton();
         ArrangeMenuItems();
         UIHelper.registEvent(gameObject, "setting_", onClickSetting);
         UIHelper.registEvent(gameObject, "deck_", onClickSelectDeck);
@@ -610,12 +639,14 @@ public class Menu : WindowServantSP
             // 只放宽裁剪区、**不动 back 的宽度** ⇒ 灰色底板外观不变，入口就是「浮在板外」。
             // 式子是自洽幂等的：读到的是刚放宽后的值，第二次调用不会再涨。
             Vector4 box = ChipButtonBoxInPanel();
-            float clipLeft = Mathf.Min(clip.x - clip.z * 0.5f, box.x - MenuClipMargin);
-            float clipRight = Mathf.Max(clip.x + clip.z * 0.5f, box.z + MenuClipMargin);
+            // 「支持作者」钉在右下角面板外，同 RD 入口一样会被 SoftClip 切掉，一并并进来。
+            Vector4 sbox = SponsorButtonBoxInPanel();
+            float clipLeft = Mathf.Min(clip.x - clip.z * 0.5f, Mathf.Min(box.x, sbox.x) - MenuClipMargin);
+            float clipRight = Mathf.Max(clip.x + clip.z * 0.5f, Mathf.Max(box.z, sbox.z) + MenuClipMargin);
             // 纵向同理合并：面板高度按可见项个数算（OCG 10 项 / RD 7 项差 120 个单位），
-            // 而芯片的 y 是**常量** —— 不并进来，面板一矮（切到 RD）芯片就被裁掉。
-            float clipBottom = Mathf.Min(centerY - height * 0.5f, box.y - MenuClipMargin);
-            float clipTop = Mathf.Max(centerY + height * 0.5f, box.w + MenuClipMargin);
+            // 而两颗按钮的 y 都是**常量** —— 不并进来，面板一矮（切到 RD）就被裁掉。
+            float clipBottom = Mathf.Min(centerY - height * 0.5f, Mathf.Min(box.y, sbox.y) - MenuClipMargin);
+            float clipTop = Mathf.Max(centerY + height * 0.5f, Mathf.Max(box.w, sbox.w) + MenuClipMargin);
 
             clip.x = (clipLeft + clipRight) * 0.5f;
             clip.z = clipRight - clipLeft;
@@ -647,14 +678,7 @@ public class Menu : WindowServantSP
     private void FitMenuClipForChip()
     {
         UIPanel panel = gameObject.GetComponent<UIPanel>();
-        Transform chip = gameObject.transform.Find(RdChipNode);
-        if (panel == null || chip == null)
-        {
-            return;
-        }
-        Transform button = UIHelper.getByName<Transform>(chip.gameObject, RdChipButton);
-        UIWidget w = (button != null ? button.gameObject : chip.gameObject).GetComponent<UIWidget>();
-        if (w == null)
+        if (panel == null)
         {
             return;
         }
@@ -663,31 +687,20 @@ public class Menu : WindowServantSP
             menuClipBase = panel.baseClipRegion;
         }
 
-        // 芯片（含底板 —— 底板是它的子节点，尺寸可能比按钮还宽）的世界包围盒 → 面板局部
+        // 两颗固定按钮（RD 入口 / 支持作者）各自（含底板）的世界包围盒 → 面板局部
+        // （支持作者没有底板，sponsorPlate 位传 null，CollectFixedChipCorners 自己会跳过）
         float minX = float.MaxValue;
         float minY = float.MaxValue;
         float maxX = float.MinValue;
         float maxY = float.MinValue;
-        Vector3[] corners = w.worldCorners;   // NGUI 内部复用数组，不产生 GC
-        for (int i = 0; i < corners.Length; i++)
+        CollectFixedChipCorners(panel, RdChipNode, RdChipButton, rdChipPlate,
+            ref minX, ref minY, ref maxX, ref maxY);
+        CollectFixedChipCorners(panel, SponsorNode, SponsorButton, null,
+            ref minX, ref minY, ref maxX, ref maxY);
+        if (minX == float.MaxValue)
         {
-            Vector3 lp = panel.transform.InverseTransformPoint(corners[i]);
-            if (lp.x < minX) minX = lp.x;
-            if (lp.y < minY) minY = lp.y;
-            if (lp.x > maxX) maxX = lp.x;
-            if (lp.y > maxY) maxY = lp.y;
-        }
-        if (rdChipPlate != null)
-        {
-            Vector3[] pc = rdChipPlate.worldCorners;
-            for (int i = 0; i < pc.Length; i++)
-            {
-                Vector3 lp = panel.transform.InverseTransformPoint(pc[i]);
-                if (lp.x < minX) minX = lp.x;
-                if (lp.y < minY) minY = lp.y;
-                if (lp.x > maxX) maxX = lp.x;
-                if (lp.y > maxY) maxY = lp.y;
-            }
+            // 一颗都没采到（按钮节点都还没造）——保持基线不动。
+            return;
         }
 
         Vector4 clip = menuClipBase;
@@ -697,6 +710,47 @@ public class Menu : WindowServantSP
         float top = Mathf.Max(clip.y + clip.w * 0.5f, maxY + MenuClipMargin);
         panel.baseClipRegion = new Vector4(
             (left + right) * 0.5f, (bottom + top) * 0.5f, right - left, top - bottom);
+    }
+
+    /// <summary>
+    /// 把一颗固定按钮（含底板）的世界包围盒并入 (minX..maxY)。找不到节点/控件就静默跳过，
+    /// 不影响另一颗 —— 两颗按钮彼此独立，谁在谁不在都不该拖垮裁剪区对账。
+    /// </summary>
+    private void CollectFixedChipCorners(
+        UIPanel panel, string nodeName, string buttonName, UISprite plate,
+        ref float minX, ref float minY, ref float maxX, ref float maxY)
+    {
+        Transform chip = gameObject.transform.Find(nodeName);
+        if (chip == null)
+        {
+            return;
+        }
+        Transform button = UIHelper.getByName<Transform>(chip.gameObject, buttonName);
+        UIWidget w = (button != null ? button.gameObject : chip.gameObject).GetComponent<UIWidget>();
+        if (w != null)
+        {
+            Vector3[] corners = w.worldCorners;   // NGUI 内部复用数组，不产生 GC
+            for (int i = 0; i < corners.Length; i++)
+            {
+                Vector3 lp = panel.transform.InverseTransformPoint(corners[i]);
+                if (lp.x < minX) minX = lp.x;
+                if (lp.y < minY) minY = lp.y;
+                if (lp.x > maxX) maxX = lp.x;
+                if (lp.y > maxY) maxY = lp.y;
+            }
+        }
+        if (plate != null)
+        {
+            Vector3[] pc = plate.worldCorners;
+            for (int i = 0; i < pc.Length; i++)
+            {
+                Vector3 lp = panel.transform.InverseTransformPoint(pc[i]);
+                if (lp.x < minX) minX = lp.x;
+                if (lp.y < minY) minY = lp.y;
+                if (lp.x > maxX) maxX = lp.x;
+                if (lp.y > maxY) maxY = lp.y;
+            }
+        }
     }
 
     /// <summary>
@@ -712,16 +766,33 @@ public class Menu : WindowServantSP
     /// </summary>
     private static Vector4 ChipButtonBoxInPanel()
     {
+        return ChipButtonBoxInPanelAt(RdChipX, RdChipY);
+    }
+
+    /// <summary>
+    /// 通用版：<see cref="ChipButtonBoxInPanel"/> 的算式对任何「克隆 setting 行、
+    /// 同缩放（RdChipScale）、位置钉在 (chipX, chipY)」的固定按钮都成立
+    /// （「支持作者」按钮即 <see cref="SponsorButtonBoxInPanel"/>）。
+    /// </summary>
+    private static Vector4 ChipButtonBoxInPanelAt(float chipX, float chipY)
+    {
         // 克隆源是「系统设置」那一行：子按钮局部 (−48, 0)、尺寸 180×50（模板值，2026-09-19 实测）。
         const float buttonLocalX = -48f;
         const float buttonLocalY = 0f;
         const float buttonWidth = 180f;
         const float buttonHeight = 50f;
-        float cx = RdChipX + buttonLocalX * RdChipScale;
-        float cy = RdChipY + buttonLocalY * RdChipScale;
+        float cx = chipX + buttonLocalX * RdChipScale;
+        float cy = chipY + buttonLocalY * RdChipScale;
         float hw = buttonWidth * 0.5f * RdChipScale;
         float hh = buttonHeight * 0.5f * RdChipScale;
         return new Vector4(cx - hw, cy - hh, cx + hw, cy + hh);
+    }
+
+    /// <summary>「支持作者」按钮的包围盒（面板局部坐标，口径同 <see cref="ChipButtonBoxInPanel"/>）。</summary>
+    private static Vector4 SponsorButtonBoxInPanel()
+    {
+        Vector2 sp = SponsorPos();
+        return ChipButtonBoxInPanelAt(sp.x, sp.y);
     }
 
     /// <summary>
@@ -955,6 +1026,198 @@ public class Menu : WindowServantSP
     }
 
     /// <summary>
+    /// 造「支持作者」入口（最右下角，点击跳爱发电）：<see cref="CreateRdChip"/> 的同款做法 ——
+    /// 克隆「系统设置」一行（自带正确的字体、切片贴图、碰撞盒与 UIEventTrigger，
+    /// 从零拼要么缺素材要么踩 NGUI 默认值的坑），砍掉图标、缩小、改文案，钉在角上。
+    ///
+    /// ⚠ **不带深色底板**（用户 2026-09-24 定稿：「不要有黑色背景」）——
+    ///   RD 徽标那块底板是用户点名要的，这里用户点名不要，两者口径相反是各自的定稿。
+    ///
+    /// ⚠ 它**不在** MenuItemOrder 里，所以 ArrangeMenuItems() 不会摆它；
+    ///   位置由 <see cref="PinSponsor"/> 每帧钉（随窗口宽高比贴角），
+    ///   裁剪区由 <see cref="FitMenuBack"/> / <see cref="FitMenuClipForChip"/> 并上
+    ///   <see cref="SponsorButtonBoxInPanel"/> 放宽（否则整颗被 SoftClip 切没）。
+    ///
+    /// ⚠ OCG / RD 两种模式下**都显示**（支持作者不分模式），不需要进 RdVisibleItems。
+    /// </summary>
+    private void CreateSponsorButton()
+    {
+        if (gameObject.transform.Find(SponsorNode) != null)
+        {
+            // 已经造过（从子界面返回主菜单时 initialize 会再跑一次），别插第二颗。
+            return;
+        }
+        Transform setting = gameObject.transform.Find("setting");
+        if (setting == null)
+        {
+            UnityEngine.Debug.LogWarning("[Sponsor] 主菜单模板不完整，无法创建支持作者入口。");
+            return;
+        }
+
+        GameObject sponsor = UnityEngine.Object.Instantiate(setting.gameObject, gameObject.transform, false);
+        sponsor.name = SponsorNode;
+        sponsor.transform.localScale = new Vector3(RdChipScale, RdChipScale, 1f);
+        PinSponsor();
+
+        // 小按钮不要图标（克隆来的图标是设置齿轮，留着反而像第二个「系统设置」）。
+        Transform icon = sponsor.transform.Find("Texture");
+        if (icon != null)
+        {
+            UnityEngine.Object.Destroy(icon.gameObject);
+        }
+
+        Transform button = UIHelper.getByName<Transform>(sponsor, "setting_");
+        if (button != null)
+        {
+            button.name = SponsorButton;
+            UILabel label = button.GetComponentInChildren<UILabel>();
+            if (label != null)
+            {
+                label.fontSize = RdChipFontSize;
+                label.text = InterString.Get("支持作者");
+                // 没有底板对账，但克隆源那一行的标签是「为图标让位」偏右的（MenuItemLabelX≈+31），
+                // 不归中字会探到按钮右缘外。pivot 归中 + 原点归零 = 文字压住按钮正中
+                // （口径同 FitChipPlateCore ①，只做一次，文字不会再变）。
+                label.pivot = UIWidget.Pivot.Center;
+                label.transform.localPosition = Vector3.zero;
+                // 金字悬在天空背景上（用户 2026-09-24 定稿无底板），补黑描边保证亮背景下的可读性
+                // （口径同 Menu.cs 里 NEW 角标 / Setting.cs 的 Outline 用法）。
+                label.effectStyle = UILabel.Effect.Outline;
+                label.effectColor = Color.black;
+                label.effectDistance = new Vector2(1.5f, 1.5f);
+            }
+            UIHelper.registEvent(gameObject, SponsorButton, onClickSponsor);
+        }
+        else
+        {
+            UnityEngine.Debug.LogWarning("[Sponsor] 找不到克隆按钮 setting_，支持作者入口点不动。");
+        }
+    }
+
+    /// <summary>点击「支持作者」：用系统默认浏览器打开爱发电主页，并把浏览器窗口拉到前台。</summary>
+    public void onClickSponsor()
+    {
+        // 探针：分清「回调没被 NGUI 点着」和「回调跑了、OpenURL 没效果」（验收脚本靠这行判）。
+        QuickTestTrace.Log("sponsor", "click -> " + SponsorUrl);
+        Application.OpenURL(SponsorUrl);
+        BringSponsorPageToFront();
+    }
+
+    // -------- OpenURL 之后把浏览器窗口带到前台（用户 2026-09-24 定稿：「打开网页后要把窗口跳到浏览器」）--------
+    //
+    // Windows 的防抢焦点规则经常让 ShellExecute 打开的页面**留在游戏后面**——尤其默认浏览器
+    // 已经在跑时只是往现有进程开新标签，前台仍是游戏窗口，玩家根本不知道页面开了。
+    // 这里开完 URL 后轮询几秒，找到标题含 afdian / 爱发电 的顶层可见窗口，
+    // 最小化就先还原，再 SetForegroundWindow 拉到游戏前面。
+
+    private const float SponsorForegroundTimeout = 12f;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(System.IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsIconic(System.IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int GetWindowText(System.IntPtr hWnd, [System.Runtime.InteropServices.Out] System.Text.StringBuilder lpString, int nMaxCount);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool EnumWindows(SponsorEnumProc lpEnumFunc, System.IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern System.IntPtr GetForegroundWindow();
+
+    private delegate bool SponsorEnumProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+    private const int SponsorSWRestore = 9;
+
+    /// <summary>轮询期间扫到的候选窗口（FindSponsorWindow 的回调往里塞）。</summary>
+    private readonly System.Collections.Generic.List<System.IntPtr> sponsorFoundWindows
+        = new System.Collections.Generic.List<System.IntPtr>();
+
+    private void BringSponsorPageToFront()
+    {
+        // Menu 不是协程宿主（无 StartCoroutine），走 Program 全局宿主 —— 与 Ocgcore 里的下载协程同口径。
+        Program.I().StartCoroutine(BringSponsorPageToFrontCoroutine());
+    }
+
+    private System.Collections.IEnumerator BringSponsorPageToFrontCoroutine()
+    {
+        float deadline = Time.realtimeSinceStartup + SponsorForegroundTimeout;
+        System.IntPtr found = System.IntPtr.Zero;
+        string foundTitle = null;
+        int scanned = 0;
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            scanned++;
+            found = FindSponsorWindow(out foundTitle);
+            if (found != System.IntPtr.Zero)
+            {
+                break;
+            }
+            yield return new WaitForSeconds(0.25f);
+        }
+        if (found == System.IntPtr.Zero)
+        {
+            // 12s 还没见着页面窗口（浏览器极慢 / 被 URL 拦截器拦了）——不硬拉，别把别的窗口误提到前台。
+            // 探针报枚举轮数：轮数多而找不到 = 窗口真没出现；轮数少 = 别的原因，看日志再判。
+            QuickTestTrace.Log("sponsor", "fg miss polls=" + scanned);
+            yield break;
+        }
+        if (IsIconic(found))
+        {
+            ShowWindow(found, SponsorSWRestore);
+        }
+        SetForegroundWindow(found);
+        // 回读验证：SetForegroundWindow 可能被系统防抢焦点规则拒掉 —— 0.5s 后看前台到底是谁。
+        yield return new WaitForSeconds(0.5f);
+        System.IntPtr fg = GetForegroundWindow();
+        System.Text.StringBuilder fgsb = new System.Text.StringBuilder(256);
+        GetWindowText(fg, fgsb, 256);
+        QuickTestTrace.Log("sponsor",
+            "fg verify " + (fg == found ? "ok" : "fail") + " title=" + fgsb.ToString());
+    }
+
+    /// <summary>枚举顶层可见窗口，取第一个标题含 afdian / 爱发电 的（游戏窗口标题不含这些词，不会误中）。
+    /// 扫到的顶层窗口总数走 out 参数（诊断枚举本身是否可用）。</summary>
+    private System.IntPtr FindSponsorWindow(out string matchedTitle)
+    {
+        matchedTitle = null;
+        sponsorFoundWindows.Clear();
+        sponsorSeenWindows = 0;
+        EnumWindows(delegate (System.IntPtr h, System.IntPtr _)
+        {
+            sponsorSeenWindows++;
+            if (!IsWindowVisible(h))
+            {
+                return true;
+            }
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(512);
+            GetWindowText(h, sb, 512);
+            string t = sb.ToString();
+            if (t.ToLower().Contains("afdian") || t.Contains("爱发电"))
+            {
+                sponsorFoundWindows.Add(h);
+                sponsorMatchedTitle = t;
+                return false;
+            }
+            return true;
+        }, System.IntPtr.Zero);
+        matchedTitle = sponsorMatchedTitle;
+        return sponsorFoundWindows.Count > 0 ? sponsorFoundWindows[0] : System.IntPtr.Zero;
+    }
+
+    /// <summary>枚举诊断：上一轮扫到的顶层窗口总数 / 命中标题（日志用）。</summary>
+    private int sponsorSeenWindows;
+    private string sponsorMatchedTitle;
+
+    /// <summary>
     /// 给模式徽标配一块**和主菜单同款的深色底板**（用户 2026-09-19：「也配上主菜单一样的黑色底色」）。
     ///
     /// 为什么原来没有：克隆源「系统设置」那一行的按钮虽然带 UISprite，但**精灵名在模板里是空的**
@@ -976,10 +1239,22 @@ public class Menu : WindowServantSP
         {
             return;
         }
+        rdChipPlate = CreateChipPlate(button, RdChipPlateNode);
+        rdChipLabel = button.GetComponentInChildren<UILabel>();
+        FitRdChipPlate();
+    }
+
+    /// <summary>
+    /// <see cref="CreateRdChipPlate"/> 的共用实现：
+    /// 借 `back` 那块板的图集与精灵名，在 button 下新造一片深色底板并返回。
+    /// （「支持作者」用户定稿不要底板，见 CreateSponsorButton —— 共用实现只服务 RD 徽标。）
+    /// </summary>
+    private UISprite CreateChipPlate(Transform button, string plateNodeName)
+    {
         Transform back = gameObject.transform.Find("back");
         UISprite backSprite = back != null ? back.GetComponent<UISprite>() : null;
 
-        GameObject plate = new GameObject(RdChipPlateNode);
+        GameObject plate = new GameObject(plateNodeName);
         plate.layer = button.gameObject.layer;
         plate.transform.SetParent(button, false);
         plate.transform.localPosition = Vector3.zero;
@@ -1011,9 +1286,7 @@ public class Menu : WindowServantSP
             label.depth = label.depth + 1;
         }
 
-        rdChipPlate = sp;
-        rdChipLabel = label;
-        FitRdChipPlate();
+        return sp;
     }
 
     /// <summary>
@@ -1030,46 +1303,56 @@ public class Menu : WindowServantSP
     ///
     /// 幂等、可每帧调（尺寸/位置没变就直接返回，NGUI 那边也不会因此标脏）。
     /// 之所以要每帧对账：`label.text` 是**下一帧**才排版出新尺寸的，切模式当帧量到的是旧值。
+    /// 实现已抽到通用版 <see cref="FitChipPlateCore"/>（「支持作者」底板共用同一套）。
     /// </summary>
     private void FitRdChipPlate()
     {
-        if (rdChipPlate == null || rdChipLabel == null)
+        FitChipPlateCore(rdChipPlate, rdChipLabel, RdChipPlateMinW, RdChipPlateMinH);
+    }
+
+    /// <summary>
+    /// <see cref="FitRdChipPlate"/> 的共用实现：对 (plate, label) 这一对做「同心 + 尺寸=文字+留白」。
+    /// 任一为 null 直接返回（按钮/底板还没造好时是常态）。
+    /// </summary>
+    private static void FitChipPlateCore(UISprite plate, UILabel label, int minW, int minH)
+    {
+        if (plate == null || label == null)
         {
             return;
         }
-        Transform button = rdChipPlate.transform.parent;
+        Transform button = plate.transform.parent;
         if (button == null)
         {
             return;
         }
 
         // ① 标签回到按钮正中
-        if (rdChipLabel.pivot != UIWidget.Pivot.Center)
+        if (label.pivot != UIWidget.Pivot.Center)
         {
-            rdChipLabel.pivot = UIWidget.Pivot.Center;
+            label.pivot = UIWidget.Pivot.Center;
         }
         Vector3 bp = button.position;
-        Vector3 lp = rdChipLabel.transform.position;
+        Vector3 lp = label.transform.position;
         if (Mathf.Abs(lp.x - bp.x) > 0.01f || Mathf.Abs(lp.y - bp.y) > 0.01f)
         {
-            rdChipLabel.transform.position = new Vector3(bp.x, bp.y, lp.z);
+            label.transform.position = new Vector3(bp.x, bp.y, lp.z);
         }
 
         // ② 底板 = 文字 + 等宽留白（有最小值兜底，两种模式不跳）
-        int w = Mathf.Max(RdChipPlateMinW, Mathf.RoundToInt(rdChipLabel.width) + RdChipPlatePadX * 2);
-        int h = Mathf.Max(RdChipPlateMinH, Mathf.RoundToInt(rdChipLabel.height) + RdChipPlatePadY * 2);
-        if (rdChipPlate.width != w)
+        int w = Mathf.Max(minW, Mathf.RoundToInt(label.width) + RdChipPlatePadX * 2);
+        int h = Mathf.Max(minH, Mathf.RoundToInt(label.height) + RdChipPlatePadY * 2);
+        if (plate.width != w)
         {
-            rdChipPlate.width = w;
+            plate.width = w;
         }
-        if (rdChipPlate.height != h)
+        if (plate.height != h)
         {
-            rdChipPlate.height = h;
+            plate.height = h;
         }
         // 底板是按钮的子节点、原点就在按钮原点 ⇒ 局部零点即同心。
-        if (rdChipPlate.transform.localPosition != Vector3.zero)
+        if (plate.transform.localPosition != Vector3.zero)
         {
-            rdChipPlate.transform.localPosition = Vector3.zero;
+            plate.transform.localPosition = Vector3.zero;
         }
     }
 
@@ -1086,25 +1369,8 @@ public class Menu : WindowServantSP
     /// 落定位置就是相机屏幕中心（iTween 的终点），所以基准点直接用同一个换算取，
     /// 不依赖父节点在哪、缩放到多少。`root.TransformVector` 负责把根坐标系里的
     /// RdChipX/RdChipY 换成世界偏移（含根节点缩放 ≈ Screen.height/700）。
+    /// 实现已抽到通用版 <see cref="PinChipAt"/>（「支持作者」按钮共用同一套）。
     /// </summary>
-    private void PinRdChip()
-    {
-        Transform chip = gameObject.transform.Find(RdChipNode);
-        if (chip == null)
-        {
-            return;
-        }
-        if (Program.camera_main_2d == null)
-        {
-            return;
-        }
-        Vector3 restWorld = Program.camera_main_2d.ScreenToWorldPoint(
-            new Vector3(Screen.width * 0.5f, Screen.height * 0.5f, 0f));
-        Vector3 want = restWorld
-            + gameObject.transform.TransformVector(new Vector3(RdChipX, RdChipY, 0f));
-        // z 保留它自己的：NGUI 的层序看 depth/panel，不看 z，别在这里引入漂移。
-        chip.position = new Vector3(want.x, want.y, chip.position.z);
-    }
 
     /// <summary>上一次采样时徽标 / 参照菜单项的屏幕坐标（`(-9999,-9999)` = 还没采过）。</summary>
     private Vector2 chipSlideLastChip = new Vector2(-9999f, -9999f);
@@ -1282,6 +1548,44 @@ public class Menu : WindowServantSP
     }
 
     /// <summary>
+    /// 固定按钮钉位通用版：<see cref="PinRdChip"/> 的算式对任何「挂在菜单窗口下、
+    /// 位置常量为 (x, y)、不随窗口/面板动」的按钮都成立（「支持作者」即 PinSponsor）。
+    /// </summary>
+    private void PinChipAt(string nodeName, float x, float y)
+    {
+        Transform chip = gameObject.transform.Find(nodeName);
+        if (chip == null)
+        {
+            return;
+        }
+        if (Program.camera_main_2d == null)
+        {
+            return;
+        }
+        Vector3 restWorld = Program.camera_main_2d.ScreenToWorldPoint(
+            new Vector3(Screen.width * 0.5f, Screen.height * 0.5f, 0f));
+        Vector3 want = restWorld
+            + gameObject.transform.TransformVector(new Vector3(x, y, 0f));
+        // z 保留它自己的：NGUI 的层序看 depth/panel，不看 z，别在这里引入漂移。
+        chip.position = new Vector3(want.x, want.y, chip.position.z);
+    }
+
+    private void PinRdChip()
+    {
+        PinChipAt(RdChipNode, RdChipX, RdChipY);
+    }
+
+    /// <summary>
+    /// 把「支持作者」钉在**最右下角**（<see cref="SponsorPos"/> 按当前窗口宽高比现算），
+    /// 口径同 <see cref="PinRdChip"/>：菜单动、按钮不动；窗口一变，按钮跟着贴新角。
+    /// </summary>
+    private void PinSponsor()
+    {
+        Vector2 sp = SponsorPos();
+        PinChipAt(SponsorNode, sp.x, sp.y);
+    }
+
+    /// <summary>
     /// 「编辑卡组」「联机模式」两项尾部的 RD 角标。
     /// 造法与超先行卡的 NEW 角标同款（运行时 new 一个 UILabel、借现有标签的字体），
     /// 只是位置贴在行按钮右端、平时 SetActive(false)。
@@ -1429,8 +1733,14 @@ public class Menu : WindowServantSP
                 //   Program.go 采样），否则会点空。
                 + " chipRaw=(" + Mathf.RoundToInt(sp.x) + "," + Mathf.RoundToInt(Screen.height - sp.y) + ")"
                 // 角标报**亮着的个数**（不是字典大小）：验收判据是「OCG 下没有 RD 角标 /
-                // RD 下有」，而 rdBadges.Count 恒等于 2，照着判什么都判不出来。
+                // RD 下有」，而 rdBadges.Count 恒等于 5，照着判什么都判不出来。
+                // ⚠ 数的是 activeSelf（角标**自己**的亮灭），并另报 live= 是 activeInHierarchy
+                //   （连父级也算）。原先只报后者 ⇒ **主菜单根被盖住时（比如设置窗口开着、
+                //   菜单正在滑入）会报 0/5**，明明 RD 下五枚都亮着（2026-09-21 实测：
+                //   RD 下同一段日志里既有 5/5 也有 0/5，全看采样那一刻菜单露没露）。
+                //   判据要的是逻辑态，所以 badges= 取 activeSelf；live= 留给排查用。
                 + " badges=" + BadgesOn() + "/" + rdBadges.Count
+                + " live=" + BadgesLive() + "/" + rdBadges.Count
                 + " ocgCards=" + YGOSharp.CardsManager.CountOf(false)
                 + " rdCards=" + YGOSharp.CardsManager.CountOf(true)
                 // 可见 / 隐藏清单：一条行就判得出「RD 只留 RD 入口」，不必去逐项读 [btn] active。
@@ -1454,8 +1764,29 @@ public class Menu : WindowServantSP
         return string.Join("|", hidden.ToArray());
     }
 
-    /// <summary>当前处于激活状态的 RD 角标个数。</summary>
+    /// <summary>
+    /// 当前**亮着**的 RD 角标个数（角标自己的 activeSelf）。
+    ///
+    /// ⚠ 这里刻意**不**用 activeInHierarchy：主菜单根被别的窗口盖住、或菜单正在滑入时，
+    ///   activeInHierarchy 全为 false，会把「RD 下五枚都亮着」报成 0/5（2026-09-21 实测）。
+    ///   角标与菜单根是两件事，判据要的是前者；后者另有 [vis]/[chipslide] 那批探针盯着。
+    ///   「屏幕上真的能看见几枚」用 <see cref="BadgesLive"/>。
+    /// </summary>
     private int BadgesOn()
+    {
+        int n = 0;
+        foreach (KeyValuePair<string, GameObject> pair in rdBadges)
+        {
+            if (pair.Value != null && pair.Value.activeSelf)
+            {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>当前**在层级里活着**（连父级一起算）的 RD 角标个数 —— 只作排查用的旁证。</summary>
+    private int BadgesLive()
     {
         int n = 0;
         foreach (KeyValuePair<string, GameObject> pair in rdBadges)
@@ -2355,7 +2686,9 @@ public class Menu : WindowServantSP
         DebugShiftMenu();
         PinRdChip();
         FitRdChipPlate();
+        PinSponsor();
         FitMenuClipForChip();
+        TraceSponsorVis();
         // 钉完再采样（帧窗内逐帧落行；窗外只在坐标变化时补记）。
         TraceChipSlide();
         TraceChipVis();
@@ -2556,6 +2889,50 @@ public class Menu : WindowServantSP
             + " clip=(" + Mathf.RoundToInt(l) + "," + Mathf.RoundToInt(b) + "," + Mathf.RoundToInt(r) + "," + Mathf.RoundToInt(t) + ")"
             + " rootLocal=(" + Mathf.RoundToInt(rootLocal.x) + "," + Mathf.RoundToInt(rootLocal.y) + ")"
             + " shift=(" + Mathf.RoundToInt(debugShiftNow.x) + "," + Mathf.RoundToInt(debugShiftNow.y) + ")");
+    }
+
+    /// <summary>上次 [sponsor] 的判据串与时刻（变化才落行，另加 2s 心跳；口径同 chipVisKey）。</summary>
+    private string sponsorVisKey = null;
+    private int sponsorVisAtMs = -100000;
+    private int sponsorVisLines = 0;
+
+    /// <summary>
+    /// 「支持作者」按钮的每帧对账探针（仅 qt_debug.on，口径同 <see cref="TraceChipVis"/>）：
+    /// 报屏幕落点 + NGUI 自己的可见判定。坐标单独看不出来「画没画」——
+    /// 被 SoftClip 整颗切掉的按钮照样报得出一组坐标，必须连 vis= 一起看。
+    /// 验收脚本按 `screen=` 的落点做真实点击 / 截图判据。
+    /// </summary>
+    private void TraceSponsorVis()
+    {
+        if (!QuickTestTrace.Enabled || sponsorVisLines >= 200 || Program.camera_main_2d == null)
+        {
+            return;
+        }
+        UIPanel panel = gameObject.GetComponent<UIPanel>();
+        Transform chip = gameObject.transform.Find(SponsorNode);
+        if (panel == null || chip == null)
+        {
+            return;
+        }
+        Transform button = UIHelper.getByName<Transform>(chip.gameObject, SponsorButton);
+        Vector3 anchor = button != null ? button.position : chip.position;
+        UIWidget w = (button != null ? button.gameObject : chip.gameObject).GetComponent<UIWidget>();
+        bool vis = w != null && panel.IsVisible(w);
+        Vector3 sp = Program.camera_main_2d.WorldToScreenPoint(anchor);
+
+        string key = (vis ? "1" : "0") + Mathf.RoundToInt(sp.x) + "," + Mathf.RoundToInt(sp.y);
+        int now = Environment.TickCount;
+        if (key == sponsorVisKey && now - sponsorVisAtMs < 2000)
+        {
+            return;
+        }
+        sponsorVisKey = key;
+        sponsorVisAtMs = now;
+        sponsorVisLines++;
+
+        QuickTestTrace.Log("sponsor",
+            "screen=(" + Mathf.RoundToInt(sp.x) + "," + Mathf.RoundToInt(Screen.height - sp.y) + ")"
+            + " vis=" + vis);
     }
 
     /// <summary>主菜单 version_ 标签兼作在线数据更新状态显示，并在回到主菜单时兑现挂起的重载。</summary>
@@ -3167,6 +3544,23 @@ public class Menu : WindowServantSP
                                 bool nc = mats.Length >= 5 && mats[4] == "1";
                                 bool ns = mats.Length >= 6 && mats[5] == "1";
                                 Program.I().aiRoom.launchMenuStyleDuel(botIdx, lh, nc, ns);
+                            }
+                            break;
+                        case "mode":
+                            // 模式直切（验收/排查用）：等价于点 RD 入口按钮（onClickRdChip 同一套
+                            // UI 刷新 + 探针重报），但不依赖鼠标注入 —— 2026-09-24 下午实锤过
+                            // 「SetCursorPos 生效、hover 探针正常，mouse_event 的按下从未到达
+                            // Input 层」（down=1 全程 0 行），此时验收用这条兜底继续走链路。
+                            // 用法：commamd.shell 写「mode RD」或「mode OCG」。
+                            // ⚠ 冷启动恒 OCG，同模式重复 Set 是空操作（不会打 [mode] set 行）。
+                            {
+                                GameModeManager.Set(mats.Length >= 2 && mats[1] == "OCG"
+                                    ? GameModeManager.Mode.OCG
+                                    : GameModeManager.Mode.RD);
+                                // shell 处理在静态方法里，UI 刷新/探针重报要走单例（与 onClickRdChip 同一套）。
+                                Program.I().menu.RefreshRdUi();
+                                Program.I().menu.TraceAllIcons();
+                                Program.I().menu.TraceRdChip();
                             }
                             break;
                         default:

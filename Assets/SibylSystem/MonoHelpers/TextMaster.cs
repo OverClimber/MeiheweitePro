@@ -13,7 +13,7 @@ public class TextMaster
             gameObject = Program.I().ocgcore.create_s(
                 Program.I().mod_simple_ngui_text,
                 position,
-                new Vector3(60, 0, 0),
+                new Vector3(Program.tableauFrontX, 0, 0),
                 true,
                 Program.ui_main_3d,
                 false

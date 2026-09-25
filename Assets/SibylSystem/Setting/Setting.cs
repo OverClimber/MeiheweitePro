@@ -81,6 +81,11 @@ public class Setting : WindowServant2D
         onchangeCloud();
         setScreenSizeValue();
         CreateTestHideAnimToggle();
+        // 「俯视角」排在两行 RD 专项**之前**（用户 2026-09-23 第 1 条）：
+        // 它是个全局键（不分 RD/OCG），不该压在「召唤怪兽前询问 / 盖放怪兽前询问」下面。
+        // ⛔ 顺序就是视觉顺序（AddExtraToggleRow 按 extraToggleRows 往下排 24px/行），
+        //   换顺序会把那两行的 slot 从 2/3 变成 3/4（行下移一行，属预期）。
+        CreateTopDownToggle();
         CreateAskMSetToggle();
         CreateAskSummonToggle();
         SyncRdBadges();
@@ -93,6 +98,53 @@ public class Setting : WindowServant2D
     private void CreateTestHideAnimToggle()
     {
         AddExtraToggleRow("testHideAnim_", "进入测试战斗时播放动画", () => "testHideAnim_", "0");
+    }
+
+    /// <summary>
+    /// 「俯视角（平面图）」开关：把相机从 60° 倾斜态抬到 90° 正俯视，牌桌变成平面图。
+    ///
+    /// **全局一个键（`topDown_`，不分 RD/OCG）** —— 这是「看牌桌的视角偏好」，与规则差异无关。
+    /// 盘面本来就是平铺的（卡 prefab 的 card 子节点烘焙 X+90），倾斜感全部来自相机 pitch，
+    /// 所以这个开关只干两件事：① 相机 pitch 60→90；② 把「面向镜头」的标签/名牌/装饰
+    /// 角度一起跟到 90（都在 `Program.tableau*` 里，见那几个成员的注释）。
+    ///
+    /// 改动即生效：写进 `Program.topDown` 后让 ocgcore 重摆一次（沿用 `onCP` 那条先例），
+    /// 相机那一步由 `fixALLcamerasPreFrame` 的每帧补间带出动画。
+    /// ⚠ 对局途中切换时，**场地的位置标签要下一局才换角度**（它们是 `GameField` 构造时建一次的，
+    ///   `realize` 不会重建整个 GameField）；卡与名牌会立刻重摆。
+    /// </summary>
+    private void CreateTopDownToggle()
+    {
+        AddExtraToggleRow("topDown_", "俯视角（平面图）", () => "topDown_", "0");
+        UIHelper.registEvent(gameObject, "topDown_", onChangeTopDown);
+    }
+
+    /// <summary>「俯视角」开关的改动回调：写全局 + 重摆场景（相机带补间过去）。</summary>
+    private void onChangeTopDown()
+    {
+        UIToggle t;
+        if (!extraRowToggles.TryGetValue("topDown_", out t) || t == null)
+        {
+            return;
+        }
+        Program.topDown = t.value;
+        // 「拉镜头」的平移量属于**上一个视角的取景**：换视角一律回到**默认机位**（最底下，
+        // `topDownPanRestZ`）。不回去的话，关掉再打开会带着上次的平移量 ⇒ 看起来像「画面歪了」，
+        // 而玩家没滚过滚轮。（`preFrameFunction` 的每帧跟随下一帧也会兜到，这里同帧先落定。）
+        Program.topDownPanZ = Program.topDownPanRestZ;
+        // 重摆场景放在**落盘之前**（用户 2026-09-23 第 1 条：「切视角时手牌强制挪位置」）：
+        // `[tdmid]` 实测这条路是**同帧**生效的（手牌 z −21.15→−20.80、缩放 1.000→1.500 一次到位）。
+        // 放在 `save()` 前是为了「重摆」不依赖磁盘写成功 —— 写配置万一抛异常（磁盘满/文件被占），
+        // 视角也该照样切、手牌也该照样摆。
+        onCP();
+        QuickTestTrace.Log("view", "topDown=" + (Program.topDown ? 1 : 0)
+            + " tilt=" + Program.tableauTilt.ToString("F0")
+            + " cover=" + Program.topDownCoverZ.ToString("F1")
+            + " handScale=" + Program.tableauHandScale(1).ToString("F3"));
+        // ⛔ 自己落盘：AddExtraToggleRow 里挂的那份 save 已被本行的 registEvent 顶掉
+        //   （UIHelper.registEvent 对 UIToggle 走的是 onClick.Clear()+Add —— 是替换不是追加），
+        //   不补这一步就只剩 saveWhenQuit 一条路 ⇒ 游戏被强杀/崩溃时这一项会丢。
+        save();
     }
 
     /// <summary>
@@ -209,6 +261,32 @@ public class Setting : WindowServant2D
         }
     }
 
+    /// <summary>
+    /// 追加行 → **行的对象本体**（创建时记下的直接引用）。
+    ///
+    /// 走这一张表而不是 <c>UIHelper.getByName</c>：后者是 `GetComponentsInChildren&lt;T&gt;()`
+    /// 的深度搜索（更贵），而且**默认跳过未激活对象** —— 本项目真踩过这个坑：曾有一行
+    /// RD 独占开关在 OCG 下被 `SetActive(false)`，getByName 就再也找不回它了。
+    /// 留着直接引用，就不必依赖「这个对象此刻是否激活」这种隐式前提。
+    /// </summary>
+    private readonly System.Collections.Generic.Dictionary<string, GameObject> extraRowObjects
+        = new System.Collections.Generic.Dictionary<string, GameObject>();
+
+    /// <summary>追加行 → 行的 UIToggle（理由同 <see cref="extraRowObjects"/>：隐藏期间 getByName 找不到）。</summary>
+    private readonly System.Collections.Generic.Dictionary<string, UIToggle> extraRowToggles
+        = new System.Collections.Generic.Dictionary<string, UIToggle>();
+
+    /// <summary>按行名取回追加行的对象本体。优先走直接引用，兜底才 getByName（未登记过的行）。</summary>
+    private GameObject FindExtraRow(string rowName)
+    {
+        GameObject go;
+        if (extraRowObjects.TryGetValue(rowName, out go) && go != null)
+        {
+            return go;
+        }
+        return UIHelper.getByName(gameObject, rowName);
+    }
+
     /// <summary>本工程往设置窗口追加的自定义开关行数（决定新行的位置和窗口要往下长多少）。</summary>
     private int extraToggleRows = 0;
 
@@ -271,8 +349,11 @@ public class Setting : WindowServant2D
         for (int i = 0; i < extraToggleRowNames.Count; i++)
         {
             string name = extraToggleRowNames[i];
-            UIToggle t = UIHelper.getByName<UIToggle>(gameObject, name);
-            if (t == null)
+            // ⚠ 同上：必须走直接引用。隐藏中的行（OCG 下的 RD 独占行）用 getByName 会被
+            //   整个跳过 —— 值不刷、方向对不上，等切回 RD 点亮时显示的还是上一次读到的旧值
+            //   （UI 与 Config 打架，正是本项目最忌讳的那类错）。
+            UIToggle t;
+            if (!extraRowToggles.TryGetValue(name, out t) || t == null)
             {
                 continue;
             }
@@ -290,7 +371,7 @@ public class Setting : WindowServant2D
             QuickTestTrace.Log("setting", "refresh " + name
                 + " key=" + keyOf() + " value=" + now + " mode=" + GameModeManager.ModeLabel);
         }
-        // 值刷完了顺手把 RD 角标刷一遍 —— 角标与「这一行现在读哪一份存档」必须同步，
+        // 值刷完再把 RD 角标刷一遍 —— 角标与「这一行现在读哪一份存档」必须同步，
         // 分开刷会出现「值已经是 RD 的、角标还灭着」的中间态被玩家看到。
         SyncRdBadges();
     }
@@ -347,6 +428,10 @@ public class Setting : WindowServant2D
         extraToggleRowNames.Add(rowName);
         extraRowKeyOf[rowName] = keyOf;
         extraRowDefault[rowName] = configDefault;
+        // 记下**直接引用**（行本体 + toggle）：刷值 / 报几何都走这两个表（详见 extraRowObjects）。
+        extraRowObjects[rowName] = clone;
+        extraRowToggles[rowName] = toggle;
+        // 记完这一行，窗口高度立刻跟着长一行。
         InstallModeHook();
         GrowWindowForExtraRows();
         if (QuickTestTrace.Enabled)
@@ -396,9 +481,9 @@ public class Setting : WindowServant2D
         const int baseHeight = 524;      // prefab 原值
         int target = baseHeight + 24 * extraToggleRows;
         int delta = target - bg.height;
-        if (delta <= 0)
+        if (delta == 0)
         {
-            return;                      // 已经长到位了
+            return;                      // 已经到位了（重复调用时走这一条）
         }
         // 下移一半抵消顶边（bg 是 pivot=Center，加高两头伸），
         // 再把直接子节点整体上移同样的量抵消掉 —— 净效果只有底边在动。
@@ -435,7 +520,9 @@ public class Setting : WindowServant2D
             for (int i = -1; i < extraToggleRowNames.Count; i++)
             {
                 string n = i < 0 ? "spyer_" : extraToggleRowNames[i];
-                Transform t = UIHelper.getByName<Transform>(gameObject, n);
+                // 追加行走直接引用（理由见 extraRowObjects）；spyer_ 是 prefab 原生行、不在追加表里。
+                GameObject go = i < 0 ? UIHelper.getByName(gameObject, n) : FindExtraRow(n);
+                Transform t = go != null ? go.transform : null;
                 if (t == null)
                 {
                     sb.Append(' ').Append(n).Append("=null");

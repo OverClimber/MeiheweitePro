@@ -482,7 +482,7 @@ public class gameHiddenButton : OCGobject
                                                 ((float)index / (float)(gezi - 1)) * (zhongdian - qidian);
                             //iTween.MoveTo(Program.I().ocgcore.cards[i].gameObject, Camera.main.ScreenToWorldPoint(screen_vector_to_move), 0.5f);
                             //iTween.RotateTo(Program.I().ocgcore.cards[i].gameObject, new Vector3(-30, 0, 0), 0.1f);
-                            Program.I().ocgcore.cards[i].TweenTo(Camera.main.ScreenToWorldPoint(screen_vector_to_move), new Vector3(-30, 0, 0),true);
+                            Program.I().ocgcore.cards[i].TweenTo(Camera.main.ScreenToWorldPoint(screen_vector_to_move), new Vector3(Program.tableauAngle(-30f), 0, 0),true);
                         }
                     }
                 }

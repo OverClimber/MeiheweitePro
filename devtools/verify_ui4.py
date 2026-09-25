@@ -55,12 +55,19 @@ import subprocess
 import sys
 import time
 
-RUN_DIR = r"D:\Game\试行pro2\YGOProUnity_V2\output\Windows"
+# ⛔ 本机绝对路径不要写死：本脚本随源码包一起分发，写死会暴露作者机器的目录结构
+#   （2026-09-23 发布审计）。默认按「脚本所在仓库」推导，需要时用环境变量覆盖：
+#     YGOPRO_RUN_DIR   运行目录（默认 <仓库>/output/Windows）
+#     YGOPRO_PROBE_OUT 截图/导出的落点（默认 <仓库上一级>/_probe_ui）
+_HERE = os.path.dirname(os.path.abspath(__file__))       # …/YGOProUnity_V2/devtools
+_REPO = os.path.dirname(_HERE)                           # …/YGOProUnity_V2
+RUN_DIR = os.environ.get("YGOPRO_RUN_DIR", os.path.join(_REPO, "output", "Windows"))
 LOG_DIR = os.path.join(RUN_DIR, "log")
 CONF = os.path.join(RUN_DIR, "config", "config.conf")
 EXE = "MeiheweitePro.exe"
 TITLE = "Meiheweite"
-OUT = r"D:\Game\试行pro2\_probe_ui"
+OUT = os.environ.get("YGOPRO_PROBE_OUT",
+                     os.path.join(os.path.dirname(_REPO), "_probe_ui"))
 
 WIN_WAIT = 90
 WAIT = 25
@@ -734,7 +741,7 @@ def ts_of(line):
 
 
 def check_bg(logp):
-    """D：RD 用独立背景图，OCG 保持原背景。
+    """D：RD 用独立背景图（texture/common/desk_rd.jpg），OCG 保持原背景。
 
     证据两路：
     · [bg] 探针行：init 时落一张（应为 OCG 原图），切 RD / 切回各落一张（path 要跟着换）。
@@ -752,7 +759,7 @@ def check_bg(logp):
     need(init and "path=texture/common/desk.jpg" in init[-1],
          "D1 启动时铺 OCG 原图（%s）" % (init[-1].split("tex=")[-1].split()[0] if init else "无",))
     need(bool(rd) and "path=texture/common/desk_rd.jpg" in rd[-1],
-         "D2 切 RD 换上独立背景")
+         "D2 切 RD 换上独立背景 desk_rd.jpg")
     need(bool(ocg) and "path=texture/common/desk.jpg" in ocg[-1],
          "D3 切回 OCG 换回原图（双向都换，不是单程）")
 

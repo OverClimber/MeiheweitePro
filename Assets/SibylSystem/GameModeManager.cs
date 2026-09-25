@@ -397,11 +397,11 @@ public static class GameModeManager
     // 「游戏开始 · 初期手卡：4 张」，贴吧/官网口径一致）。
     //
     // 这个数**不在 core 的规则层**里，而是 AI.Server 的启动参数 ——
-    // 见 AIRoom 拼的那串 `7911 -1 5 0 F ?  ?  8000 <初始手牌> 1 0 0 <seed>`，
-    // 位置是 argv[8]（同 ygoserver/gframe.cpp 的「start_lp / start_hand / draw_count」口径）。
+    // 见 AIRoom 拼的那串 `7911 -1 5 0 5 ? ? 8000 <初始手牌> 1 0 0 <seed>`，
+    // 位置是**命令行第 9 格**（不含 exe，第 1 格 = 端口；口径见 AIRoom 那张参数表）。
     // 判定性实测（_probe_rddeal.py，同一份 rd/ai、只改这一个数）：
-    //     argv[8]=5 → 第 1 回合手牌 6/5（5 张起手 + 先攻规则抽 1）
-    //     argv[8]=4 → 第 1 回合手牌 5/4（**RD 正确值**：4 张起手 + 先攻规则抽 1）
+    //     第 9 格=5 → 第 1 回合手牌 6/5（5 张起手 + 先攻规则抽 1）
+    //     第 9 格=4 → 第 1 回合手牌 5/4（**RD 正确值**：4 张起手 + 先攻规则抽 1）
     // 也就是说 RD 的「多抽一张」从来不是 core 的锅，是这里多喂了一张。
     //
     // ⚠ 别把这个数交给 lua 去补：core 的起手是**先于**任何 lua 效果发的牌，
@@ -416,4 +416,42 @@ public static class GameModeManager
     {
         get { return IsRD ? StartHandRD : StartHandOCG; }
     }
+
+    // ============================ 人机开局规则号（MasterRule）============================
+    //
+    // 用户口径：**联机 RD 局是大师规则 3，单机也要是 3**（OCG 那边本来就是 5，不动）。
+    //
+    // 2026-09-21：这个数在 AI.Server 命令行里的位置，是用**直连探针**坐实的，
+    // 不是照抄注释猜出来的 —— `_probe_aiserver_rule.py`（连上 AI.Server 后照客户端
+    // 的手顺发 ExternalAddress/PlayerInfo/JoinGame，再把它回的 `STOC_JoinGame`
+    // 逐字段解出来）；`_probe_argtable.py` / `_probe_sweep.py` 做「一次动一格」的对照。
+    // 客户端读进 `Ocgcore.MasterRule` 的，就是 JoinGame 里那个 `duel_rule` 字节
+    // （Room.StocMessage_JoinGame，字段顺序同 ygopro 的 HostInfo）。
+    //
+    // 实测映射（**命令行第 5 格，不含 exe**）：
+    //     第 5 格 = "1".."5" → duel_rule = 1..5                ← 我们要的就是这个
+    //     第 5 格 = 0 / 非数字（原值的 "F"）/ 空 → duel_rule = 5（默认值）
+    //     第 5 格 = "-1" → duel_rule = 255（按字节截断）
+    //     （"T" 是个例外，落在 4 —— 那一格大概还兼着别的开关，所以**只喂纯数字**。）
+    //
+    // ⛔ 别再把规则号往第 3 格里塞：第 3 格是**卡池**（0 OCG / 1 TCG / 2 简中 /
+    //   3 自制 / 4 无独有 / 5 混合），客户端只拿它拼房间界面那句「(混合卡池)」。
+    //   上一轮就是塞错了格子：RD 的房间描述会变成「自制卡卡池」，而 MasterRule
+    //   纹丝不动仍是 5（探针实测 第 3 格=3 → rule=3、duel_rule=5）。已还原成 5。
+    //
+    // 规则号本身**不参与 RD 的判定**：格位走 `Ocgcore.get_point_worldposition_rd`、
+    // 贴图走 `gameField.OldFieldPath`，两条线都不看 MasterRule。它影响的是
+    // 「同一副 RD 盘面在联机/单机两处报出同一个数」以及相位/规则文案的排布。
+    // ⚠ 但它确实是喂给服务器建局的那个值 —— 改完必须跑 RD 验收，确认
+    //   「盘面 + 手牌 + 收尾」三样还是绿的。
+
+    public const int DuelRuleOCG = 5;
+    public const int DuelRuleRD = 3;
+
+    /// <summary>人机局的决斗规则号 = 服务器 JoinGame 里的 duel_rule（AIRoom 拼命令行时读它）。</summary>
+    public static int DuelRule
+    {
+        get { return IsRD ? DuelRuleRD : DuelRuleOCG; }
+    }
+
 }

@@ -75,3 +75,8 @@ commamd.shell
 # Python 字节码（devtools/ 下的脚本会生成 __pycache__，别混进提交）
 __pycache__/
 *.pyc
+
+# devtools/ 生成器吐出的对照预览图（可复跑重放，不入库）
+devtools/newfield_rd_preview.png
+devtools/phase_rd_preview.png
+devtools/mp1_rd_preview.png

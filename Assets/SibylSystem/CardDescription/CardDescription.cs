@@ -376,6 +376,10 @@ public class CardDescription : Servant
         {
             return;
         }
+        // 验收探针：这次调用真把哪张卡摆到了左侧说明面板上（`[ms] show code=<id>`）。
+        // 「鼠标移到极大怪兽的 L/R 上要能直接看到**它自己**的效果」这条需求，判据就得咬
+        // 这一行的 id —— 光验「面板没崩」验不出显示的是本体还是部件。
+        QuickTestTrace.Log("ms", "show code=" + card.Id);
         if (card.Id == 0)
         {
             apply(card,def,tail);

@@ -37,8 +37,22 @@ public class SelectServer : WindowServantSP
         public List<ServerEntry> items = new List<ServerEntry>();
     }
 
-    /// <summary>存档键：全部服务器定义（含出厂预置；删掉预置后不会复现）。</summary>
+    /// <summary>存档键：全部服务器定义（含出厂预置；删掉预置后不会复现）。OCG 侧沿用这个老键。</summary>
     private const string ServersKey = "customServers";
+
+    /// <summary>
+    /// 存档键：**RD 侧**的服务器清单。
+    ///
+    /// 为什么必须分家（用户 2026-09-22 第 1 项「ocg 和 rd 的联机面板历史记录分开存储」）：
+    /// 两个模式原来共用这一份清单 —— 在 RD 里「管理服务器…」加/删/改一台，改的其实是 OCG
+    /// 面板里的同一份历史（反之亦然）。这跟上一轮修的「上次选中 / 上次手输地址」是同一族问题，
+    /// 只是这两项更显眼（整张清单都是同一份）。分家后各记各的。
+    ///
+    /// ⚠ **RD 首次运行从老键播种一次**（见 loadServers）：分家的目的是「往后互不影响」，
+    ///   不是「把玩家已经攒的清单清空」。播种只发生一次 —— 之后 RD 键存在了，两边就再也
+    ///   不会互相看见。
+    /// </summary>
+    private const string ServersKeyRD = "customServers_rd";
 
     /// <summary>存档键：上次选中的服务器（沿用 KoishiPro2 的键名）。OCG 侧就是这个老键。</summary>
     private const string PickerKey = "serversPicker";
@@ -72,13 +86,25 @@ public class SelectServer : WindowServantSP
     /// <summary>这个条目是不是 RD 预置（按 host 判，用户自己改了名字也认得出来）。</summary>
     private static bool IsRdPreset(ServerEntry s)
     {
-        return s != null && s.ip != null && s.ip.Trim().ToLower() == RdServerHost;
+        return s != null && IsRdPresetHost(s.ip);
+    }
+
+    /// <summary>这个 host 是不是 RD 预置那个地址（旧存档「串味」的识别也用同一口径）。</summary>
+    private static bool IsRdPresetHost(string ip)
+    {
+        return !string.IsNullOrEmpty(ip) && ip.Trim().ToLowerInvariant() == RdServerHost;
     }
 
     /// <summary>当前模式该读写的「上次选择」键。</summary>
     private string PickerKeyNow
     {
         get { return GameModeManager.IsRD ? PickerKeyRD : PickerKey; }
+    }
+
+    /// <summary>当前模式该读写的服务器清单键（理由见 <see cref="ServersKeyRD"/>）。</summary>
+    private string ServersKeyNow
+    {
+        get { return GameModeManager.IsRD ? ServersKeyRD : ServersKey; }
     }
 
     /// <summary>
@@ -134,12 +160,49 @@ public class SelectServer : WindowServantSP
         public List<PswBucket> buckets = new List<PswBucket>();
     }
 
-    /// <summary>存档键：全部服务器的密码历史（分桶）。</summary>
+    /// <summary>存档键：全部服务器的密码历史（分桶）。OCG 侧沿用这个老键。</summary>
     private const string HistoryKey = "hostHistoryV1";
+
+    /// <summary>
+    /// 存档键：**RD 侧**的密码历史（分桶）。理由同 <see cref="ServersKeyRD"/> ——
+    /// 「服务器清单 + 密码历史」合起来就是联机面板记住的那份「历史记录」。
+    /// 桶本身按 ip:port 分，本来就不会串味；分家的意义在**写入互不影响**
+    /// （在一边连过某台机器，不会把记录写进另一边的历史）。
+    /// 同样地，RD 首次运行从老键播种一次，不丢老数据。
+    /// </summary>
+    private const string HistoryKeyRD = "hostHistoryV1_rd";
 
     /// <summary>存档键：[自定义] 模式下上次手输的地址（下拉选中的服务器由 PickerKey 记）。</summary>
     private const string LastIpKey = "lastOnlineIp";
     private const string LastPortKey = "lastOnlinePort";
+
+    /// <summary>
+    /// 存档键：**RD 侧**的「上次手输地址」。口径与 <see cref="PickerKeyRD"/> 完全一致。
+    ///
+    /// 为什么必须分家（用户 2026-09-22）：这两个键原来是两模式共用的，而联机时**无论选的是
+    /// 预置条目还是 [自定义] 都会被写一遍**（见 KF_onlineGame）—— 于是「在 RD 里连过一次
+    /// 超速决斗（RD）服」，rd.moenext.com:961 就被写进了共用键；切回 OCG 后 [自定义] 的
+    /// ip/port 输入框里躺着的就是 RD 的地址，点「连接」静默连错服务器。
+    /// </summary>
+    private const string LastIpKeyRD = "lastOnlineIp_rd";
+    private const string LastPortKeyRD = "lastOnlinePort_rd";
+
+    /// <summary>当前模式该读写的「上次手输地址」键。</summary>
+    private string LastIpKeyNow
+    {
+        get { return GameModeManager.IsRD ? LastIpKeyRD : LastIpKey; }
+    }
+
+    private string LastPortKeyNow
+    {
+        get { return GameModeManager.IsRD ? LastPortKeyRD : LastPortKey; }
+    }
+
+    /// <summary>当前模式该读写的密码历史（分桶）键（理由见 <see cref="HistoryKeyRD"/>）。</summary>
+    private string HistoryKeyNow
+    {
+        get { return GameModeManager.IsRD ? HistoryKeyRD : HistoryKey; }
+    }
 
     /// <summary>每台服务器最多记几条密码。</summary>
     private const int HistoryCap = 8;
@@ -169,12 +232,42 @@ public class SelectServer : WindowServantSP
         return defaults;
     }
 
+    /// <summary>
+    /// 按键分家后**首次**进 RD：把老键（两模式共用的那一份）原样抄到该模式的键上，
+    /// 返回「这个模式该用的存档原文」。
+    ///
+    /// 分家的目的是「往后互不影响」，不是「把玩家已经攒的东西清空」⇒ 老键里有数据就播种一次。
+    /// ⚠ 只在目标键还**空**的时候播种（调用方只在读到空串时才进来）：写过一次之后两边就彻底
+    ///   独立了，不会出现「在 OCG 里删了一台服务器、切回 RD 又冒出来」。
+    /// </summary>
+    private static string SeedFromLegacy(string nowKey, string legacyKey)
+    {
+        if (nowKey == legacyKey)
+        {
+            return Config.Get(legacyKey, "");
+        }
+        string legacy = Config.Get(legacyKey, "");
+        if (legacy != "")
+        {
+            Config.Set(nowKey, legacy);
+            QuickTestTrace.Log("server", "history seeded key=" + nowKey
+                + " from=" + legacyKey + " bytes=" + legacy.Length);
+        }
+        return legacy;
+    }
+
     private void loadServers()
     {
         servers = null;
         try
         {
-            ServerList saved = JsonUtility.FromJson<ServerList>(Config.Get(ServersKey, ""));
+            // ⚠ 读的必须是**这个模式**的键：两模式共用一份时，RD 里改清单会改到 OCG 那份（见 ServersKeyRD）
+            string raw = Config.Get(ServersKeyNow, "");
+            if (raw == "")
+            {
+                raw = SeedFromLegacy(ServersKeyNow, ServersKey);
+            }
+            ServerList saved = JsonUtility.FromJson<ServerList>(raw);
             if (saved != null && saved.items != null && saved.items.Count > 0)
             {
                 servers = saved.items;
@@ -191,7 +284,7 @@ public class SelectServer : WindowServantSP
 
     private void saveServers()
     {
-        Config.Set(ServersKey, JsonUtility.ToJson(new ServerList { items = servers }));
+        Config.Set(ServersKeyNow, JsonUtility.ToJson(new ServerList { items = servers }));
     }
 
     private ServerEntry findServer(string serverName)
@@ -223,12 +316,37 @@ public class SelectServer : WindowServantSP
         return HostKey(inputIP != null ? inputIP.value : "", inputPort != null ? inputPort.value : "");
     }
 
+    /// <summary>
+    /// 密码历史里所有桶的 host，按字典序拼一串（给探针用，见 show() 那条 `[serverp]`）。
+    /// 排序是为了「内容不变则字符串不变」—— 落盘顺序会随写入先后变，直接拼接会假报「变了」。
+    /// </summary>
+    private string PswHostsSig()
+    {
+        if (pswBuckets == null || pswBuckets.Count == 0)
+        {
+            return "";
+        }
+        string[] ks = new string[pswBuckets.Count];
+        for (int i = 0; i < pswBuckets.Count; i++)
+        {
+            ks[i] = pswBuckets[i] == null ? "?" : pswBuckets[i].key;
+        }
+        Array.Sort(ks);
+        return string.Join("|", ks);
+    }
+
     private void loadPswStore()
     {
         pswBuckets = new List<PswBucket>();
         try
         {
-            PswStore saved = JsonUtility.FromJson<PswStore>(Config.Get(HistoryKey, ""));
+            // ⚠ 键按模式分家（见 HistoryKeyRD）：读**这个模式**那份，空的话从老键播种一次
+            string raw = Config.Get(HistoryKeyNow, "");
+            if (raw == "")
+            {
+                raw = SeedFromLegacy(HistoryKeyNow, HistoryKey);
+            }
+            PswStore saved = JsonUtility.FromJson<PswStore>(raw);
             if (saved != null && saved.buckets != null)
             {
                 pswBuckets = saved.buckets;
@@ -320,7 +438,7 @@ public class SelectServer : WindowServantSP
 
     private void SavePswStore()
     {
-        Config.Set(HistoryKey, JsonUtility.ToJson(new PswStore { buckets = pswBuckets }));
+        Config.Set(HistoryKeyNow, JsonUtility.ToJson(new PswStore { buckets = pswBuckets }));
     }
 
     private List<string> PswsFor(string key)
@@ -568,12 +686,21 @@ public class SelectServer : WindowServantSP
         {
             return;
         }
+        // 清单与密码历史都按模式分家 ⇒ 切模式必须**重新读盘**，否则手里拿的还是上一个模式的
+        // 那一份（下拉里会继续显示 OCG 的服务器、密码候选也是 OCG 的）。
+        loadServers();
+        loadPswStore();
         currentServer = "";
         refreshServerItems();
         applyServer(Config.Get(PickerKeyNow, DefaultPickerValue()), false);
+        RefreshPswSuggestions();
         QuickTestTrace.Log("mode", "server picker rebuilt mode=" + GameModeManager.ModeLabel
             + " ip=" + (inputIP != null ? inputIP.value : "") 
             + " port=" + (inputPort != null ? inputPort.value : "")
+            // 历史记录分家的判据：报「这个模式读的是哪个键 + 里面有几条」
+            + " serversKey=" + ServersKeyNow + " servers=" + servers.Count
+            + " historyKey=" + HistoryKeyNow + " historyBuckets="
+            + (pswBuckets != null ? pswBuckets.Count : -1)
             // ⚠ 服务器名可能是用户自己起的、带空格，`picked=` 与禁限表探针同一口径放**行尾**。
             + " picked=" + serverList.value);
     }
@@ -1252,10 +1379,39 @@ public class SelectServer : WindowServantSP
         if (currentServer == CustomItem)
         {
             // [自定义] 没有服务器条目可填，上次手输的地址也要原样还回来
-            inputIP.value = Config.Get(LastIpKey, "");
-            inputPort.value = Config.Get(LastPortKey, "");
+            // ⚠ 两个键按模式分家（见 LastIpKeyRD）：共用的话「在 RD 里连过一次 RD 服」会把
+            //   rd.moenext.com 写进 OCG 的 [自定义] 输入框，点「连接」就静默连错服务器。
+            string lastIp = Config.Get(LastIpKeyNow, "");
+            string lastPort = Config.Get(LastPortKeyNow, "");
+            // 旧存档补救：键分家**之前**的共用存档里可能已经躺着 RD 的地址 —— OCG 侧读出
+            // 它就当没有（空框让用户自己填）。没有这一步，本轮修完问题依旧在场上。
+            if (!GameModeManager.IsRD && IsRdPresetHost(lastIp))
+            {
+                lastIp = "";
+                lastPort = "";
+            }
+            inputIP.value = lastIp;
+            inputPort.value = lastPort;
             RefreshServerDependentUI();
         }
+        // 验收探针（用户 2026-09-22「OCG 联机不得沿用 RD 的偏好设置」）：把**这个模式**这次
+        // 真正填进输入框的三样东西落一行。判据咬的就是「OCG 那一行里不许出现 rd.moenext.com」——
+        // 光验「键名分家了」验不出用户看到的那一格。⚠ 必须在填完输入框之后记。
+        // ⚠ 2026-09-22 扩了后半段：用户第 1 项要的是「联机面板**历史记录**分开存储」，
+        // 历史记录 = 服务器清单（ServersKeyNow）+ 密码历史（HistoryKeyNow）。
+        // 只报 ip/port 看不出这两份分没分家（它们是按模式换键读的，键名 + 条数才判得出来）；
+        // `server0` / `pswKeys` 再给出**内容**上的一眼判据（清单里第一台的名字、桶的 host 列表），
+        // 免得「条数一样但其实是同一份」这种假绿。
+        QuickTestTrace.Log("serverp", "show mode=" + GameModeManager.ModeLabel
+            + " picker=[" + Config.Get(PickerKeyNow, DefaultPickerValue()) + "]"
+            + " ip=[" + (inputIP != null ? inputIP.value : "?") + "]"
+            + " port=[" + (inputPort != null ? inputPort.value : "?") + "]"
+            + " serversKey=" + ServersKeyNow
+            + " servers=" + (servers != null ? servers.Count : -1)
+            + " server0=[" + (servers != null && servers.Count > 0 ? servers[0].name : "") + "]"
+            + " historyKey=" + HistoryKeyNow
+            + " historyBuckets=" + (pswBuckets != null ? pswBuckets.Count : -1)
+            + " pswKeys=[" + PswHostsSig() + "]");
         Program.charge();
         Program.I().ocgcore.returnServant = Program.I().selectServer;
         // 窗口缩放（fixScreenProblem）在 +50ms 才生效，之后再报坐标给验收脚本。
@@ -1397,8 +1553,10 @@ public class SelectServer : WindowServantSP
                 SavePswStore();
                 // 就算从来没动过服务器下拉框（[自定义] 手输地址），这次选择也要记住
                 Config.Set(PickerKeyNow, currentServer == "" ? CustomItem : currentServer);
-                Config.Set(LastIpKey, ipString);
-                Config.Set(LastPortKey, portString);
+                // ⚠ 两个键都按模式分家（见 LastIpKeyRD）：选的是预置条目也照写 —— 它的用途是
+                //   「下次进这个模式时输入框里显示什么」，跨模式串味就是这里进来的。
+                Config.Set(LastIpKeyNow, ipString);
+                Config.Set(LastPortKeyNow, portString);
                 RefreshHistoryPopup();
                 RefreshPswSuggestions();
                 (new Thread(() => { TcpHelper.join(ipString, name, portString, pswString,versionString); })).Start();

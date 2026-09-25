@@ -490,6 +490,7 @@ public class Room : WindowServantSP
         rule = r.ReadByte();
         mode = r.ReadByte();
         Program.I().ocgcore.MasterRule = r.ReadChar();
+        QuickTestTrace.Log("rule", "JoinGame -> MasterRule=" + Program.I().ocgcore.MasterRule);
         no_check_deck = r.ReadBoolean();
         no_shuffle_deck = r.ReadBoolean();
         r.ReadByte();
