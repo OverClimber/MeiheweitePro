@@ -230,6 +230,7 @@ public class Menu : WindowServantSP
         UIHelper.registEvent(gameObject, "deck_", onClickSelectDeck);
         UIHelper.registEvent(gameObject, "superPre_", onClickSuperPre);
         UIHelper.registEvent(gameObject, "online_", onClickOnline);
+        UIHelper.registEvent(gameObject, "myCard_", onClickMyCard);
         UIHelper.registEvent(gameObject, "replay_", onClickReplay);
         UIHelper.registEvent(gameObject, "single_", onClickPizzle);
         UIHelper.registEvent(gameObject, "ai_", onClickAI);
@@ -254,7 +255,7 @@ public class Menu : WindowServantSP
     {
         "ai",
         "online",
-        "legacy",
+        "myCard",
         "replay",
         "single",
         "deck",
@@ -265,13 +266,8 @@ public class Menu : WindowServantSP
         "exit",
     };
 
-    /// <summary>两种模式下都**隐藏**的菜单项。</summary>
-    ///
-    /// rdUpdate 是 RD 专属入口（OCG 下不露头）；legacy 是上游模板里遗留的预留槽位，
-    /// 本版不使用，同样走 SetActive(false) 隐去 —— 这样 MenuItemIcon /
-    /// MenuItemIconTone / MenuItemButtonX / MenuItemLabelX 这几个按 MenuItemOrder 下标
-    /// 索引的并行数组一个都不用动，排版数学不变。
-    private static readonly string[] OcgHiddenItems = { "rdUpdate", "legacy" };
+    /// <summary>OCG 模式下**隐藏**的菜单项（RD 专属入口放这里，OCG 看不到）。</summary>
+    private static readonly string[] OcgHiddenItems = { "rdUpdate" };
 
     /// <summary>
     /// 每项使用的图标精灵名（同一张 transAtlas）。
@@ -279,7 +275,8 @@ public class Menu : WindowServantSP
     /// online 原来错写成 ai（与「人机模式」同为显示器图标），
     /// 运行时代码克隆 setting 造「退出游戏」时又没换图标（两个齿轮）。
     /// 末 3 项 YGOPro2 没有对应入口，从同一张图集里另选体量相近的图标，
-    /// 并避开已被占用的语义：link 留给隐藏的预留槽位，超先行卡沿用 new，资源下载沿用 file。
+    /// 并避开已被占用的语义：MyCard 不用 wlan（地球已归「联机模式」）而用 link，
+    /// 超先行卡沿用 new，资源下载沿用 file。
     /// </summary>
     private static readonly string[] MenuItemIcon =
     {
@@ -291,7 +288,7 @@ public class Menu : WindowServantSP
     ///
     /// transAtlas 里只有 YGOPro2 原生那 7 个图标是 #D6D6D6（214），
     /// 其余精灵（含借来的 link / new / file）都是 #FFFFFF（255）。
-    /// 直接摆在一起，后加的这几项会比同级项亮一档，一眼看出是「拼进来的」。
+    /// 直接摆在一起，MyCard / 超先行卡 / 资源下载 会比同级项亮一档，一眼看出是「拼进来的」。
     /// UISprite.color 只能往下压，所以把偏白的这三个乘到原生灰。
     /// </summary>
     private static readonly float[] MenuItemIconTone =
@@ -341,13 +338,12 @@ public class Menu : WindowServantSP
     /// 背景板几何中心相对根原点的偏移量。
     ///
     /// YGOPro2 原生是 7 项，代入后上缘 172、下缘 -172，中心恰好 0（面板天然居中）；
-    /// 本项目另加了「超先行卡 / 资源下载」两项（另有一个隐藏的预留槽位，
-    /// 见 OcgHiddenItems），项数一变背景板就跟着伸缩，几何中心便不再落在 0 上。
-    /// 把这个偏移从所有子元素的 y 上统一减掉，
+    /// 本项目多出 MyCard / 超先行卡 / 资源下载 3 项，背景板向下多伸 3×40=120，
+    /// 几何中心就下沉 60。把这个偏移从所有子元素的 y 上统一减掉，
     /// 面板即在默认根坐标（0,0 = 屏幕中心）下精确居中，且项数再变动时自动保持居中。
     ///
     /// ⚠ 项数取的是**当前模式可见项**，不是 MenuItemOrder.Length ——
-    ///   RD 下只留 4 项（见 RdVisibleItems），用全部项数算出来的偏移会把整块面板顶偏。
+    ///   RD 下只留 4 项（见 RdVisibleItems），用 10 项算出来的偏移会把整块面板顶偏。
     /// </summary>
     private static float MenuVerticalCenterOffset()
     {
@@ -428,7 +424,7 @@ public class Menu : WindowServantSP
     /// 按 YGOPro2 的规格统一排布主菜单：位置、图标、字号、文字偏移、背景板一次性算好。
     ///
     /// 上游模板把 ai / single 两个节点留在了与其它项冲突的坐标上
-    /// （两个节点几乎重合），所以位置一律由这里算出，
+    /// （ai(49.6) 与 myCard(50.3) 几乎重合），所以位置一律由这里算出，
     /// 模板里的坐标只当占位。
     ///
     /// 只在 `initialize` 里调（本工程的窗口不可拖动）。**模式切换时不要调这个**，
@@ -543,7 +539,7 @@ public class Menu : WindowServantSP
     /// 把菜单项图标的精灵名、色调与屏幕坐标落一条轨迹。
     ///
     /// 排查用：图标色调只在 UISprite.color 上体现，截图量灰度又会被hover高亮、
-    /// 版本号文字、彩色图标带偏。直接报「用了哪个精灵 + 乘了多少」
+    /// 版本号文字、彩色图标（地球/MyCard）带偏。直接报「用了哪个精灵 + 乘了多少」
     /// 才是可判定的证据，屏幕坐标则让验收脚本能在正确的位置取样。
     /// </summary>
     private static void TraceIcon(Transform item, int index, UISprite icon, float tone)
@@ -2995,6 +2991,10 @@ public class Menu : WindowServantSP
         Program.I().shiftToServant(Program.I().selectServer);
     }
 
+    void onClickMyCard()
+    {
+        Program.I().shiftToServant(Program.I().mycard);
+    }
 
     void onClickAI()
     {
@@ -3429,7 +3429,10 @@ public class Menu : WindowServantSP
             {
                 return;
             }
-
+            if (Program.I().mycard == null)
+            {
+                return;
+            }
             // 命令文件是「外部写入、游戏消费」的单向通道：
             //   * 启动参数 -j/-d/-r/-s 由 Program 自己写（见 Program.Start 里的 cmdFile）；
             //   * 调试/验收脚本直接在游戏根目录写它。

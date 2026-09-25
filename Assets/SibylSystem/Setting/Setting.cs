@@ -22,11 +22,7 @@ public class Setting : WindowServant2D
         UIHelper.getByName<UIToggle>(gameObject, "handPosition_").value = UIHelper.fromStringToBool(Config.Get("handPosition_", "1"));
         UIHelper.getByName<UIToggle>(gameObject, "handmPosition_").value = UIHelper.fromStringToBool(Config.Get("handmPosition_", "1"));
         UIHelper.getByName<UIToggle>(gameObject, "spyer_").value = UIHelper.fromStringToBool(Config.Get("spyer_", "1"));
-        // 缺省置「开」：本开关决定 WindowServantSP.resize() 要不要把整个窗体
-        // （连同里面的字号）按 Screen.height / 700 统一缩放。缺省为「关」时，
-        // 一个没有 config.conf 的全新安装会以 1:1 呈现 —— 在 1080p 下界面只有
-        // 正常大小的约 65%，表现为「界面和字体都比预期小一圈」。
-        UIHelper.getByName<UIToggle>(gameObject, "resize_").value = UIHelper.fromStringToBool(Config.Get("resize_", "1"));
+        UIHelper.getByName<UIToggle>(gameObject, "resize_").value = UIHelper.fromStringToBool(Config.Get("resize_", "0"));
         UIHelper.getByName<UIToggle>(gameObject, "longField_").value = UIHelper.fromStringToBool(Config.Get("longField_", "0"));
         if (QualitySettings.GetQualityLevel()<3)
         {

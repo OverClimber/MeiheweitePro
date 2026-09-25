@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Net.Sockets;
 using YGOSharp.Network.Enums;
 using UnityEngine;
@@ -16,69 +17,353 @@ public static class TcpHelper
 
     static bool canjoin = true;
 
-    public static void join(string ipString, string name, string portString, string pswString, string version)
+    // ===================== 连接层健壮性（对齐 hex 版 ygopro2 的 TcpHelper）=====================
+    // 做的事：把「一条连接」显式建成带**代际**的对象；收发由「每包新建一个线程 + 共享 List」
+    //         换成「单发送线程 + 每连接独立队列」；补上三种超时、TCP 保活、队列上限、瞬态错误重试。
+    //
+    // ⛔⛔ 移植红线 —— 以下 ours 定制必须逐条保住，丢任何一条都是回归：
+    //   · QuickTestTrace 的 "stoc"/"ctos" 落点（验收脚本判据）
+    //   · inboundCount / lastInboundMs（AIRoom.WatchdogTick 判对手卡死）
+    //   · DuelUndo.selfDisconnect 静默跳过、AIRoom.IsAiSessionLive 分支
+    //   · addDateJumoLine 保持 public（precy.cs 录像回放注入）
+    //   · packagesInRecord / lastRecordName / GameModeManager.ReplayDir（Ocgcore 直接读写）
+    //   · Disconnect(bool userInitiated = true) 的签名与「断开 ⇒ 走一次断线收尾」语义
+    //   · tcpClient 保持 public static TcpClient（5 个文件在直接 switch/Close 它）
+    //
+    // ✅ 应用层空闲心跳（TryDuelIdleHeartbeat）已按 hex 移植（2026-09-25 补）。
+    //   此前把它删掉的理由（"会往人机局入站流掺包、破坏 DuelTimeline 的同种子判据"）**不成立**：
+    //   hex 原版有守卫 `ocgcore.condition != Condition.duel → return`，只在**决斗中**才发，
+    //   而本工程 AI 侧（AI.Server / WindBot）根本不消费 CtosMessage.TimeConfirm ⇒ 不会掺包。
+    //   与 TCP KeepAlive（ConfigureSocket 里开）互补：那个防 NAT 掐空闲，这个防服务端按"客户端无响应"判掉线。
+
+    const int SioKeepAliveVals = -1744830460;
+
+    static readonly object stateLock = new object();
+    static ConnectionState state = null;
+
+    /// <summary>离线核心 / 录像回放注入的入站包，走独立一条队列（不挂在任何连接上）。</summary>
+    static readonly ConcurrentQueue<byte[]> injectedIncoming = new ConcurrentQueue<byte[]>();
+    static long injectedIncomingBytes = 0;
+    static int injectedIncomingPackets = 0;
+
+    /// <summary>join 重入闸：一条连接正在建立时，后来的 join 直接丢弃（CAS 抢 0→1）。</summary>
+    static int joinInProgress = 0;
+    static int generationCounter = 0;
+    /// <summary>待通知主线程的断线来自哪一代；0 = 没有待处理断线。</summary>
+    static int disconnectGeneration = 0;
+
+    static Thread senderThread = null;
+
+    public static int ConnectTimeoutMs = 10000;
+    public static int KeepAliveTimeMs = 20000;
+    public static int KeepAliveIntervalMs = 5000;
+    /// <summary>决斗中空闲多久补一条 TimeConfirm（对齐 hex）。见 TryDuelIdleHeartbeat。</summary>
+    public static int DuelIdleHeartbeatMs = 15000;
+    public static int SendRetryDelayMs = 50;
+    public static int MaxTransientSendRetry = 3;
+
+    public static int SendTimeoutMs = 9999 * 1000;
+    public static int ReceiveTimeoutMs = 9999 * 1000;
+    public static bool TcpNoDelay = true;
+    public static bool TcpKeepAlive = true;
+
+    public static int OutgoingQueueLimitBytes = 4 * 1024 * 1024;
+    public static int OutgoingQueueLimitPackets = 4096;
+    public static int IncomingQueueLimitBytes = 8 * 1024 * 1024;
+    public static int IncomingQueueLimitPackets = 8192;
+
+    /// <summary>连的是「房间列表」这种一次性用途（密码 "L"）时，掉线提示不该弹。</summary>
+    static bool roomListChecking = false;
+
+    /// <summary>
+    /// 一条活连接。带 <see cref="Generation"/> 是为了让**旧连接的迟到事件失效**：
+    /// 撤回重开（关旧连、开新连）时旧 receiver 线程可能还会报一次断线，
+    /// 比代际就能把它丢掉 —— 顺带减少对 DuelUndo.selfDisconnect 那种补丁的依赖。
+    /// </summary>
+    sealed class ConnectionState : IDisposable
     {
-        if (canjoin)
+        public readonly int Generation;
+        public readonly TcpClient Client;
+        public readonly NetworkStream Stream;
+        public readonly Socket Socket;
+        public readonly ConcurrentQueue<byte[]> Incoming = new ConcurrentQueue<byte[]>();
+        public readonly ConcurrentQueue<byte[]> Outgoing = new ConcurrentQueue<byte[]>();
+        public readonly AutoResetEvent OutgoingSignal = new AutoResetEvent(false);
+        public readonly CancellationTokenSource Cts = new CancellationTokenSource();
+
+        public volatile bool Closing = false;
+        public int DisconnectRequested = 0;
+
+        public long IncomingBytes = 0;
+        public int IncomingPackets = 0;
+        public long OutgoingBytes = 0;
+        public int OutgoingPackets = 0;
+
+        // 三个 tick 共同决定「这条连接是不是空闲到该补心跳」。
+        // 收/发任一方向有流量都算「活着」，避免对手本回合不出牌时误发心跳。
+        public int LastReceiveTick = 0;
+        public int LastSendTick = 0;
+        public int LastHeartbeatTick = 0;
+
+        public ConnectionState(int generation, TcpClient client)
         {
-            if (tcpClient == null || tcpClient.Connected == false)
-            {
-                canjoin = false;
-                try
-                {
-                    tcpClient = new TcpClientWithTimeout(ipString, int.Parse(portString), 3000).Connect();
-                    networkStream = tcpClient.GetStream();
-                    Thread t = new Thread(receiver);
-                    t.Start();
-                    CtosMessage_ExternalAddress(ipString);
-                    CtosMessage_PlayerInfo(name);
-                    CtosMessage_JoinGame(pswString, version);
-                }
-                catch (Exception e)
-                {
-                    Program.DEBUGLOG("onDisConnected 10");
-                }
-                canjoin = true;
-            }
+            Generation = generation;
+            Client = client;
+            Stream = client.GetStream();
+            Socket = client.Client;
+
+            int now = Environment.TickCount;
+            LastReceiveTick = now;
+            LastSendTick = now;
+            LastHeartbeatTick = now;
         }
-        else
+
+        public void Dispose()
         {
-            onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 1");
+            try { OutgoingSignal.Dispose(); } catch { }
+            try { Cts.Dispose(); } catch { }
         }
     }
 
-    public static void receiver()
+    static int TickNow()
     {
+        return Environment.TickCount;
+    }
+
+    static bool IsElapsed(int fromTick, int durationMs)
+    {
+        return unchecked(TickNow() - fromTick) >= durationMs;
+    }
+
+    /// <summary>
+    /// 决斗中的空闲心跳（对齐 hex TcpHelper.TryDuelIdleHeartbeat）。
+    /// 收/发任一方向空闲超过 DuelIdleHeartbeatMs 就补一条 TimeConfirm，让服务端知道客户端还活着
+    /// —— 长局（天梯十几分钟）里某一方长时间不出牌时，没有它容易被按"无响应"判掉线。
+    /// <para>⛔ 守卫 `condition == Condition.duel` 必须保留：非决斗态（组卡/房内等待/人机收尾）
+    /// 发这个是协议噪音，且会让"人机局入站流 = 种子决定的确定流"的判据产生错觉。</para>
+    /// </summary>
+    static void TryDuelIdleHeartbeat(ConnectionState localState)
+    {
+        if (localState == null || localState.Closing)
+            return;
+
+        Program program = Program.I();
+        if (program == null || program.ocgcore == null)
+            return;
+
+        if (program.ocgcore.condition != Ocgcore.Condition.duel)
+            return;
+
+        int lastReceive = Volatile.Read(ref localState.LastReceiveTick);
+        int lastSend = Volatile.Read(ref localState.LastSendTick);
+        // 收发任一方向有动作都算"活着"：timeout 用 int 差再比大小，避免直接比 TickCount 溢出。
+        int lastActivity = unchecked(lastSend - lastReceive) > 0 ? lastSend : lastReceive;
+
+        if (!IsElapsed(lastActivity, DuelIdleHeartbeatMs))
+            return;
+
+        int lastHeartbeat = Volatile.Read(ref localState.LastHeartbeatTick);
+        if (!IsElapsed(lastHeartbeat, DuelIdleHeartbeatMs))
+            return;
+
+        Volatile.Write(ref localState.LastHeartbeatTick, TickNow());
+        QuickTestTrace.Log("net", "idle heartbeat gen=" + localState.Generation + " → TimeConfirm");
+        CtosMessage_TimeConfirm();
+    }
+
+    static bool IsTransientSocketError(SocketError socketError)
+    {
+        return socketError == SocketError.WouldBlock
+            || socketError == SocketError.IOPending
+            || socketError == SocketError.NoBufferSpaceAvailable
+            || socketError == SocketError.TimedOut
+            || socketError == SocketError.Interrupted
+            || socketError == SocketError.InProgress
+            || socketError == SocketError.TryAgain;
+    }
+
+
+    public static void join(string ipString, string name, string portString, string pswString, string version)
+    {
+        // 重入闸（对齐 hex 的 joinInProgress CAS）：同一时刻只允许一条连接在建立。
+        if (Interlocked.CompareExchange(ref joinInProgress, 1, 0) != 0)
+        {
+            Program.DEBUGLOG("onDisConnected 1");
+            return;
+        }
+
+        TcpClient client = null;
+        ConnectionState newState = null;
+
         try
         {
-            while (tcpClient != null && networkStream != null && tcpClient.Connected && Program.Running)
+            // ⛔ 保留 ours 原语义：已经有一条活连接时静默忽略本次 join。
+            //    hex 是无条件「断旧连再新建」，那会在「人已在房里又点到进服」时把对局踢掉。
+            if (tcpClient != null && tcpClient.Connected)
             {
-                byte[] data = SocketMaster.ReadPacket(networkStream);
-                addDateJumoLine(data);
+                Program.DEBUGLOG("onDisConnected 1");
+                return;
             }
-            onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 2");
+
+            onDisConnected = false;
+            roomListChecking = pswString == "L";
+
+            CloseActiveConnection();
+
+            int port = int.Parse(portString);
+            client = new TcpClientWithTimeout(ipString, port, ConnectTimeoutMs).Connect();
+
+            ConfigureSocket(client);
+
+            int generation = Interlocked.Increment(ref generationCounter);
+            newState = new ConnectionState(generation, client);
+            try { newState.Stream.ReadTimeout = ReceiveTimeoutMs; } catch { }
+            try { newState.Stream.WriteTimeout = SendTimeoutMs; } catch { }
+
+            lock (stateLock)
+            {
+                state = newState;
+                tcpClient = client;
+                networkStream = newState.Stream;
+            }
+
+            Thread receiverThread = new Thread(ReceiverLoop);
+            receiverThread.IsBackground = true;
+            receiverThread.Start(newState);
+
+            senderThread = new Thread(SenderLoop);
+            senderThread.IsBackground = true;
+            senderThread.Start(newState);
+
+            QuickTestTrace.Log("ctos", "join " + ipString + ":" + port + " gen=" + generation
+                + " psw=" + (string.IsNullOrEmpty(pswString) ? "(空)" : "(有)")
+                + " matching=" + (Program.I().mycard != null && Program.I().mycard.isMatching));
+
+            CtosMessage_ExternalAddress(ipString);
+            CtosMessage_PlayerInfo(name);
+            CtosMessage_JoinGame(pswString, version);
         }
         catch (Exception e)
         {
             onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 3");
+            Program.DEBUGLOG("onDisConnected 10: " + e.Message);
+            try { if (client != null) client.Close(); } catch { }
+            try { if (newState != null) newState.Dispose(); } catch { }
+            CloseActiveConnection();
         }
-
+        finally
+        {
+            Interlocked.Exchange(ref joinInProgress, 0);
+        }
     }
 
-    public static void addDateJumoLine(byte[] data)
+    /// <summary>按 TcpHelper 的静态开关配置套接字：NoDelay + TCP 保活 + 收发超时。</summary>
+    static void ConfigureSocket(TcpClient client)
     {
-        Monitor.Enter(datas);
+        if (client == null)
+            return;
+
+        try { client.NoDelay = TcpNoDelay; } catch { }
+        try { client.Client.NoDelay = TcpNoDelay; } catch { }
+
         try
         {
-            datas.Add(data);
+            client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, TcpKeepAlive);
         }
-        catch (System.Exception e)
+        catch { }
+
+        try
         {
-            UnityEngine.Debug.Log(e);
+            // Windows 下用 IOControl 才调得到保活间隔（默认 2 小时等于没开）：
+            // 20s 空闲开始探测、每 5s 一次 —— 防公网 NAT 把长时间思考的静默连接掐掉。
+            byte[] keepAlive = new byte[12];
+            BitConverter.GetBytes((uint)1).CopyTo(keepAlive, 0);
+            BitConverter.GetBytes((uint)KeepAliveTimeMs).CopyTo(keepAlive, 4);
+            BitConverter.GetBytes((uint)KeepAliveIntervalMs).CopyTo(keepAlive, 8);
+            client.Client.IOControl((IOControlCode)SioKeepAliveVals, keepAlive, null);
         }
-        Monitor.Exit(datas);
+        catch { }
+
+        try
+        {
+            client.Client.SendTimeout = SendTimeoutMs;
+            client.Client.ReceiveTimeout = ReceiveTimeoutMs;
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// 收包线程（每条连接一个，绑定到它自己的 ConnectionState）。
+    /// ⛔ 不再在这里直接置 onDisConnected —— 统一走 RequestDisconnect 并带上代际，
+    ///    旧连接迟到的断线事件由主线程按代际丢掉。
+    /// </summary>
+    static void ReceiverLoop(object obj)
+    {
+        var localState = (ConnectionState)obj;
+        try
+        {
+            var token = localState.Cts.Token;
+            while (!token.IsCancellationRequested && Program.Running)
+            {
+                byte[] data = SocketMaster.ReadPacket(localState.Stream, token);
+                if (data == null)
+                {
+                    RequestDisconnect(localState, "onDisConnected 2");
+                    break;
+                }
+
+                Volatile.Write(ref localState.LastReceiveTick, TickNow());
+
+                if (!TryEnqueueIncoming(localState, data))
+                {
+                    break;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            RequestDisconnect(localState, "onDisConnected 3: " + e.Message);
+        }
+    }
+
+    static bool TryEnqueueIncoming(ConnectionState localState, byte[] data)
+    {
+        if (data == null)
+            return false;
+
+        long bytes = Interlocked.Add(ref localState.IncomingBytes, data.Length);
+        int packets = Interlocked.Increment(ref localState.IncomingPackets);
+
+        if (bytes > IncomingQueueLimitBytes || packets > IncomingQueueLimitPackets)
+        {
+            RequestDisconnect(localState, "onDisConnected incoming overflow");
+            return false;
+        }
+
+        localState.Incoming.Enqueue(data);
+        return true;
+    }
+
+    /// <summary>
+    /// 把一个入站包注入主线程派发队列（离线核心 / 录像回放用）。
+    /// ⛔ 必须保持 public static、签名不变：precy.cs 在调它。
+    ///    传 null 直接丢（原实现会把 null 塞进列表，等消费端炸）。
+    /// </summary>
+    public static void addDateJumoLine(byte[] data)
+    {
+        if (data == null)
+            return;
+
+        long bytes = Interlocked.Add(ref injectedIncomingBytes, data.Length);
+        int packets = Interlocked.Increment(ref injectedIncomingPackets);
+        if (bytes > IncomingQueueLimitBytes || packets > IncomingQueueLimitPackets)
+        {
+            Interlocked.Add(ref injectedIncomingBytes, -data.Length);
+            Interlocked.Decrement(ref injectedIncomingPackets);
+            return;
+        }
+
+        injectedIncoming.Enqueue(data);
     }
 
     public static bool onDisConnected = false;
@@ -91,36 +376,141 @@ public static class TcpHelper
 
     /// <summary>
     /// 主动断开当前连接。
-    /// userInitiated 为 true 表示用户主动退出（例如从服务器选择界面返回），
-    /// 此时只关闭套接字，由 receiver 线程走正常的收尾流程，
-    /// 不再额外置位 onDisConnected，避免重复触发断线处理。
+    /// ⛔ 对外语义保持不变（ours 原版）：无论 userInitiated 取值，断开之后都要走一次断线收尾
+    ///    —— MyCard.onClickExit / AIRoom 都依赖 <see cref="preFrameFunction"/> 里那个收尾分支。
+    ///    实现换成「直接关掉这条连接（取消收发线程 + 清 state）」再置位 onDisConnected，
+    ///    不再依赖 receiver 线程事后发现断开（那条路在代际模型里会被判成旧连接事件）。
     /// </summary>
     public static void Disconnect(bool userInitiated = true)
     {
+        bool hadConnection = tcpClient != null;
         try
         {
-            if (tcpClient != null && tcpClient.Connected)
-            {
-                tcpClient.Client.Shutdown(SocketShutdown.Both);
-                tcpClient.Close();
-            }
+            CloseActiveConnection();
         }
         catch (System.Exception e)
         {
             Program.DEBUGLOG("Disconnect error: " + e.Message);
         }
-        tcpClient = null;
-        networkStream = null;
-        if (userInitiated == false)
+
+        if (hadConnection || userInitiated == false)
         {
             onDisConnected = true;
         }
     }
 
+    /// <summary>
+    /// 请求断开一条具体连接（收发线程内部调用）。带代际：只有「当前这条」才通知主线程，
+    /// 旧连接迟到的事件直接丢弃。debugLog 沿用 ours 的 "onDisConnected N" 文案，便于日志比对。
+    /// </summary>
+    static void RequestDisconnect(ConnectionState localState, string debugLog)
+    {
+        if (localState == null)
+            return;
+
+        if (Interlocked.Exchange(ref localState.DisconnectRequested, 1) != 0)
+            return;
+
+        localState.Closing = true;
+        try { localState.Cts.Cancel(); } catch { }
+        try { localState.OutgoingSignal.Set(); } catch { }
+
+        bool shouldNotifyMainThread;
+        lock (stateLock)
+        {
+            shouldNotifyMainThread = ReferenceEquals(state, localState);
+        }
+
+        if (shouldNotifyMainThread)
+        {
+            Interlocked.Exchange(ref disconnectGeneration, localState.Generation);
+            onDisConnected = true;
+            if (!string.IsNullOrEmpty(debugLog))
+                Program.DEBUGLOG(debugLog);
+        }
+    }
+
+    /// <summary>关掉当前连接：取消收发线程、Shutdown/Close 套接字、清掉 state 与 tcpClient。</summary>
+    static void CloseActiveConnection()
+    {
+        ConnectionState oldState;
+        lock (stateLock)
+        {
+            oldState = state;
+            state = null;
+        }
+
+        if (oldState != null)
+        {
+            oldState.Closing = true;
+            try { oldState.Cts.Cancel(); } catch { }
+            try { oldState.OutgoingSignal.Set(); } catch { }
+
+            try
+            {
+                if (oldState.Client != null)
+                {
+                    try
+                    {
+                        if (oldState.Client.Connected)
+                        {
+                            oldState.Socket.Shutdown(SocketShutdown.Both);
+                        }
+                    }
+                    catch { }
+
+                    try { oldState.Client.Close(); } catch { }
+                }
+            }
+            catch { }
+
+            try { oldState.Stream.Close(); } catch { }
+
+            oldState.Dispose();
+        }
+
+        tcpClient = null;
+        networkStream = null;
+    }
+
+    /// <summary>
+    /// 主线程独占的派发缓冲：每帧先把两条来源的包搬进来，再统一走一遍 switch。
+    /// （原来它由 receiver 线程直接写、需要 Monitor 保护；现在收包线程只写自己连接的队列，
+    ///   这个 List 只有主线程碰，Monitor 保留只是为了不动下面那段派发代码。）
+    /// </summary>
     static List<byte[]> datas = new List<byte[]>();
 
     public static void preFrameFunction()
     {
+        // ① 注入包（离线核心 / 录像回放，来自 precy.cs 的 addDateJumoLine）—— 与连接无关。
+        while (injectedIncoming.TryDequeue(out var injectedPacket))
+        {
+            Interlocked.Add(ref injectedIncomingBytes, -injectedPacket.Length);
+            Interlocked.Decrement(ref injectedIncomingPackets);
+            datas.Add(injectedPacket);
+        }
+
+        // ② 当前连接的入站包。按 state 取而不是读某个全局流 —— 旧连接的残留包不会再被算进来，
+        //    这正是撤回重开（关旧连、开新连）时最容易串味的地方。
+        ConnectionState localState;
+        lock (stateLock)
+        {
+            localState = state;
+        }
+
+        // 决斗空闲心跳（对齐 hex：取到当前连接状态后立刻判）—— 只在 condition==duel 时才会真发。
+        TryDuelIdleHeartbeat(localState);
+
+        if (localState != null)
+        {
+            while (localState.Incoming.TryDequeue(out var incomingPacket))
+            {
+                Interlocked.Add(ref localState.IncomingBytes, -incomingPacket.Length);
+                Interlocked.Decrement(ref localState.IncomingPackets);
+                datas.Add(incomingPacket);
+            }
+        }
+
         if (datas.Count>0)
         {
             if (Monitor.TryEnter(datas))
@@ -230,16 +620,40 @@ public static class TcpHelper
         if (onDisConnected == true)
         {
             onDisConnected = false;
-            if (TcpHelper.tcpClient != null)
+
+            // 代际闸（对齐 hex）：只认「当前这条连接」的断线。
+            // 撤回重开是「关旧连 + 开新连」，旧 receiver 线程可能还会报一次断线 ——
+            // 那种迟到事件如果照样跑下面的收尾，就会在玩家已经进了新局之后
+            // 又弹一次提示 / 再切一次界面。比对代际直接丢掉。
+            int gen = Interlocked.Exchange(ref disconnectGeneration, 0);
+            bool closeNow;
+            lock (stateLock)
+            {
+                closeNow = gen != 0 && state != null && state.Generation == gen;
+            }
+            if (gen != 0 && !closeNow)
+            {
+                QuickTestTrace.Log("net", "stale disconnect ignored gen=" + gen);
+                return;
+            }
+
+            if (closeNow)
+            {
+                CloseActiveConnection();
+            }
+            else if (TcpHelper.tcpClient != null)
             {
                 if (TcpHelper.tcpClient.Connected)
                 {
                     tcpClient.Client.Shutdown(0);
                     tcpClient.Close();
                 }
+                tcpClient = null;
             }
-
-            tcpClient = null;
+            else
+            {
+                tcpClient = null;
+            }
 
             // 🔑 撤回重开主动断的旧连接：静默跳过。
             //   这一段断开的语义是「后台重建的一部分」—— 既不是对手进程没了，也不是连接故障，
@@ -254,6 +668,12 @@ public static class TcpHelper
                 QuickTestTrace.Log("undo", "self-disconnect swallowed（撤回重开的旧连接）");
                 return;
             }
+
+            // 天梯回环（对齐 hex 版 TcpHelper.preFrameFunction 的断线分支）：
+            // 匹配中掉线要把人送回竞技场界面 —— 否则当前是「被丢回服务器列表，而竞技场还停在匹配中」。
+            // ⛔ 插在 DuelUndo.selfDisconnect 静默跳过之后：撤回重开主动断的旧连接不算掉线。
+            // ⛔ 非匹配态此调用不改任何去向（人机局 AIRoom 分支因此不受影响）。
+            Program.I().ocgcore.setDefaultReturnServant();
 
             if (Program.I().ocgcore.isShowed == false)
             {
@@ -306,40 +726,139 @@ public static class TcpHelper
         }
     }
 
+    /// <summary>
+    /// 出站包入队（对齐 hex 的单发送线程模型）。
+    /// 原来每发一个包就 new 一个 Thread —— 长局里每回合几十条 Response/TimeConfirm，
+    /// 线程创建本身就成了开销；改成一个常驻 sender 线程从队列取。
+    /// ⛔ 发送顺序由 FIFO 队列保证，与原来 lock 串行等价。
+    /// ⛔ QuickTestTrace 的 "ctos" 落点保留（验收脚本判据），仍在「真正写进 socket 之后」记。
+    /// </summary>
     public static void Send(Package message)
     {
-        if (tcpClient != null && tcpClient.Connected)
+        ConnectionState localState;
+        lock (stateLock)
         {
-            Thread t = new Thread(sender);
-            t.Start(message);
+            localState = state;
+        }
+
+        if (localState == null || localState.Closing)
+            return;
+
+        try
+        {
+            byte[] frame = BuildFrame(message);
+            if (frame == null)
+                return;
+
+            long bytes = Interlocked.Add(ref localState.OutgoingBytes, frame.Length);
+            int packets = Interlocked.Increment(ref localState.OutgoingPackets);
+            if (bytes > OutgoingQueueLimitBytes || packets > OutgoingQueueLimitPackets)
+            {
+                Interlocked.Add(ref localState.OutgoingBytes, -frame.Length);
+                Interlocked.Decrement(ref localState.OutgoingPackets);
+                RequestDisconnect(localState, "onDisConnected outgoing overflow");
+                return;
+            }
+
+            localState.Outgoing.Enqueue(frame);
+            localState.OutgoingSignal.Set();
+        }
+        catch (Exception e)
+        {
+            RequestDisconnect(localState, "onDisConnected 5: " + e.Message);
         }
     }
 
-    static object locker = new object();
-
-    static void sender(object o)
+    /// <summary>拼线上帧：2 字节长度 + 1 字节功能码 + 包体；长度字段 = 包体长度 + 1（含功能码）。</summary>
+    static byte[] BuildFrame(Package message)
     {
+        if (message == null || message.Data == null)
+            return null;
+
+        byte[] data = message.Data.get();
+
+        byte[] s = new byte[2 + 1 + data.Length];
+        ushort len = (ushort)(data.Length + 1);
+        s[0] = (byte)(len & 0xFF);
+        s[1] = (byte)((len >> 8) & 0xFF);
+        s[2] = (byte)message.Fuction;
+        Buffer.BlockCopy(data, 0, s, 3, data.Length);
+        return s;
+    }
+
+    /// <summary>常驻发送线程：从队列取帧写进 socket；瞬态错误退避重试，失败即请求断开。</summary>
+    static void SenderLoop(object obj)
+    {
+        var localState = (ConnectionState)obj;
+        var token = localState.Cts.Token;
+
         try
         {
-            lock (locker)
+            while (!token.IsCancellationRequested && Program.Running)
             {
-                Package message = (Package)o;
-                byte[] data = message.Data.get();
-                MemoryStream memstream = new MemoryStream();
-                BinaryWriter b = new BinaryWriter(memstream);
-                b.Write(BitConverter.GetBytes((Int16)data.Length + 1), 0, 2);
-                b.Write(BitConverter.GetBytes((byte)message.Fuction), 0, 1);
-                b.Write(data, 0, data.Length);
-                byte[] s = memstream.ToArray();
-                tcpClient.Client.Send(s);
-                QuickTestTrace.Log("ctos", "sent " + ((CtosMessage)message.Fuction) + " (" + s.Length + "B)");
+                if (!localState.Outgoing.TryDequeue(out var frame))
+                {
+                    localState.OutgoingSignal.WaitOne(100);
+                    continue;
+                }
+
+                Interlocked.Add(ref localState.OutgoingBytes, -frame.Length);
+                Interlocked.Decrement(ref localState.OutgoingPackets);
+
+                try
+                {
+                    SendAll(localState.Socket, frame, token);
+                    Volatile.Write(ref localState.LastSendTick, TickNow());
+                    // 功能码在帧的 [2] 上（前两字节是长度）。
+                    QuickTestTrace.Log("ctos", "sent " + ((CtosMessage)frame[2]) + " (" + frame.Length + "B)");
+                }
+                catch (Exception e)
+                {
+                    QuickTestTrace.Log("ctos", "send FAILED: " + e.Message);
+                    RequestDisconnect(localState, "onDisConnected 5: " + e.Message);
+                    break;
+                }
             }
         }
         catch (Exception e)
         {
-            QuickTestTrace.Log("ctos", "send FAILED: " + e.Message);
-            onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 5");
+            RequestDisconnect(localState, "onDisConnected sender loop: " + e.Message);
+        }
+    }
+
+    /// <summary>把一帧完整写进 socket；瞬态错误（WouldBlock/TimedOut 等）退避重试。</summary>
+    static void SendAll(Socket socket, byte[] buffer, CancellationToken token)
+    {
+        if (socket == null || buffer == null)
+            return;
+
+        int offset = 0;
+        int retry = 0;
+        while (offset < buffer.Length)
+        {
+            if (token.IsCancellationRequested)
+                return;
+
+            try
+            {
+                int sent = socket.Send(buffer, offset, buffer.Length - offset, SocketFlags.None);
+                if (sent <= 0)
+                    throw new IOException("socket send returned 0");
+
+                offset += sent;
+                retry = 0;
+            }
+            catch (SocketException socketException)
+            {
+                if (IsTransientSocketError(socketException.SocketErrorCode) && retry < MaxTransientSendRetry)
+                {
+                    retry++;
+                    Thread.Sleep(SendRetryDelayMs * retry);
+                    continue;
+                }
+
+                throw;
+            }
         }
     }
 
@@ -936,33 +1455,78 @@ public static class BinaryExtensions
 
 public class SocketMaster
 {
-    static byte[] ReadFull(NetworkStream stream, int length)
+    const int HeaderLength = 2;
+    const int MaxPayloadLength = 0xFFFF;
+
+    /// <summary>
+    /// 读满 length 字节。返回 null 表示「这条连接完了」（对端关闭 / 被取消 / 套接字已释放）——
+    /// 调用方据此请求断开，不再像旧实现那样直接置全局 onDisConnected 还返回半截缓冲。
+    /// 读超时不是断线：ReceiveTimeoutMs 到了只说明这段空闲没包，继续等。
+    /// </summary>
+    static byte[] ReadFull(NetworkStream stream, int length, CancellationToken token)
     {
+        if (stream == null)
+            return null;
+        if (length == 0)
+            return Array.Empty<byte>();
+        if (length < 0)
+            return null;
+
         var buf = new byte[length];
         int rlen = 0;
         while (rlen < buf.Length)
         {
-            int currentLength = stream.Read(buf, rlen, buf.Length - rlen);
-            rlen += currentLength;
-            if (currentLength == 0)
+            if (token.IsCancellationRequested)
+                return null;
+
+            int currentLength;
+            try
             {
-                TcpHelper.onDisConnected = true;
-                Program.DEBUGLOG("onDisConnected 6");
-                break;
+                currentLength = stream.Read(buf, rlen, buf.Length - rlen);
             }
+            catch (IOException ioEx) when (IsTimeout(ioEx))
+            {
+                continue;
+            }
+            catch (SocketException se) when (se.SocketErrorCode == SocketError.TimedOut)
+            {
+                continue;
+            }
+            catch (ObjectDisposedException)
+            {
+                return null;
+            }
+
+            if (currentLength == 0)
+                return null;
+
+            rlen += currentLength;
         }
 
         return buf;
     }
 
-    public static byte[] ReadPacket(NetworkStream stream)
+    static bool IsTimeout(IOException ioEx)
     {
-        var hdr = ReadFull(stream, 2);
-        var plen = BitConverter.ToUInt16(hdr, 0);
-        var buf = ReadFull(stream, plen);
-        return buf;
+        if (ioEx == null)
+            return false;
+        if (ioEx.InnerException is SocketException se)
+            return se.SocketErrorCode == SocketError.TimedOut;
+        return false;
     }
 
+    public static byte[] ReadPacket(NetworkStream stream, CancellationToken token)
+    {
+        var hdr = ReadFull(stream, HeaderLength, token);
+        if (hdr == null)
+            return null;
+
+        var plen = BitConverter.ToUInt16(hdr, 0);
+        if (plen == 0 || plen > MaxPayloadLength)
+            return null;
+
+        return ReadFull(stream, plen, token);
+    }
 }
 
 public class TcpClientWithTimeout
@@ -973,6 +1537,13 @@ public class TcpClientWithTimeout
     protected TcpClient connection;
     protected bool connected;
     protected Exception exception;
+
+    /// <summary>
+    /// 合作式取消标志（对齐 hex）：超时后不再对本线程 <c>Thread.Abort()</c>。
+    /// Abort 是会破坏运行时状态的 API —— 它可能把线程停在 DNS 解析 / socket 连接的中途，
+    /// 留下半开的句柄；而这里的目标只是「别等它了」，让后台线程自己 Close 掉即可。
+    /// </summary>
+    private volatile bool _isCancelled = false;
 
     public TcpClientWithTimeout(string hostname, int port, int timeout_milliseconds)
     {
@@ -985,46 +1556,68 @@ public class TcpClientWithTimeout
         // kick off the thread that tries to connect
         connected = false;
         exception = null;
+        _isCancelled = false;
         Thread thread = new Thread(new ThreadStart(BeginConnect));
         thread.IsBackground = true; // 作为后台线程处理
                                     // 不会占用机器太长的时间
         thread.Start();
 
         // 等待如下的时间
-        thread.Join(_timeout_milliseconds);
-
-        if (connected == true)
+        if (thread.Join(_timeout_milliseconds))
         {
+            if (exception != null)
+            {
+                // 如果失败就抛出错误
+                TcpHelper.onDisConnected = true;
+                Program.DEBUGLOG("onDisConnected 7");
+                throw exception;
+            }
             // 如果成功就返回TcpClient对象
-            thread.Abort();
             return connection;
         }
-        if (exception != null)
-        {
-            // 如果失败就抛出错误
-            thread.Abort();
-            TcpHelper.onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 7");
-            throw exception;
-        }
-        else
-        {
-            // 同样地抛出错误
-            thread.Abort();
-            string message = string.Format("TcpClient connection to {0}:{1} timed out",
-              _hostname, _port);
-            TcpHelper.onDisConnected = true;
-            Program.DEBUGLOG("onDisConnected 8");
-            throw new TimeoutException(message);
-        }
+
+        // 超时：给后台线程发取消信号，让它自己收尾（⛔ 不 Abort）
+        _isCancelled = true;
+        TcpHelper.onDisConnected = true;
+        Program.DEBUGLOG("onDisConnected 8");
+        throw new TimeoutException(string.Format("TcpClient connection to {0}:{1} timed out",
+          _hostname, _port));
     }
     protected void BeginConnect()
     {
         try
         {
-            connection = new TcpClient(_hostname, _port);
-            // 标记成功，返回调用者
-            connected = true;
+            // TcpClient 构造函数本身可能卡很久（DNS 解析），所以先建空的、再用异步连接。
+            var client = new TcpClient();
+            if (_isCancelled)
+            {
+                client.Close();
+                return;
+            }
+
+            IAsyncResult result = client.BeginConnect(_hostname, _port, null, null);
+            WaitHandle handle = result.AsyncWaitHandle;
+            if (handle.WaitOne(_timeout_milliseconds))
+            {
+                if (_isCancelled)
+                {
+                    client.Close();
+                    return;
+                }
+
+                // 这一步会把连接失败的原因抛出来
+                client.EndConnect(result);
+                connection = client;
+                connected = true;
+            }
+            else
+            {
+                client.Close();
+                if (!_isCancelled)
+                {
+                    exception = new TimeoutException("Inner connection timeout.");
+                }
+            }
         }
         catch (Exception ex)
         {

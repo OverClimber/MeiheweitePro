@@ -983,7 +983,7 @@ public class UnityFileDownloader
     }
 
     /// <summary>
-    /// 探测远端文件元数据：优先 HEAD；部分 CDN 边缘节点（如超先行卡最新指针 URL）只允许 GET、
+    /// 探测远端文件元数据：优先 HEAD；部分 CDN 边缘节点（如萌卡的超先行卡最新指针 URL）只允许 GET、
     /// 对 HEAD 返回 405，此时回退为 1 字节 Range GET，避免版本检查与下载被直接判死。
     /// </summary>
     private static IEnumerator ProbeRemoteMetadata(

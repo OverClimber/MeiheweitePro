@@ -123,6 +123,9 @@ public class Room : WindowServantSP
             Menu.deleteShell();
         }
         base.show();
+        // 天梯回环（对齐 hex 版 Room.show）：一进房间界面就把返回目标钉住。
+        // 匹配态 ⇒ mycard；非匹配态该方法内部不做任何改动，保护换副卡组(deckManager)/人机局(aiRoom)的既有去向。
+        Program.I().ocgcore.setDefaultReturnServant();
         Program.I().ocgcore.handler = handler;
         UIHelper.registEvent(toolBar, "input_", onChat);
         Program.charge();
@@ -422,6 +425,11 @@ public class Room : WindowServantSP
 
     public void StocMessage_DuelStart(BinaryReader r)
     {
+        // 天梯回环（对齐 hex 版 Room.StocMessage_DuelStart）：开局前再钉一次返回目标。
+        // ⚠ 位置在 StocMessage_ChangeSide（把 returnServant 拨向 deckManager）之后 ——
+        //   hex 同序：换完备打的那一局收尾时回竞技场，而不是留在卡组界面。
+        //   非匹配态此调用不改任何东西，所以人机/服务器对局换备行为不变。
+        Program.I().ocgcore.setDefaultReturnServant();
         quickDuelStarted = true;
         QuickTestTrace.Log("duel", "DuelStart received (quick=" + quickThisDuel
             + " undoRestart=" + undoRestartThisDuel + ")");

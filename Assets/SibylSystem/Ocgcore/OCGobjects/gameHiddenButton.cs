@@ -327,7 +327,7 @@ public class gameHiddenButton : OCGobject
                     det += " " + zone + "/" + it.p.sequence + "/" + it.get_data().Id;
                 }
             }
-            QuickTestTrace.Log("memo", "cards deck=" + deck + " hand=" + hand + " grave=" + grave
+            QuickTestTrace.Log("memo", "mycards deck=" + deck + " hand=" + hand + " grave=" + grave
                 + " removed=" + removed + " extra=" + extra + " field=" + field
                 + " unknown=" + unknown + " search=" + search + det);
         }

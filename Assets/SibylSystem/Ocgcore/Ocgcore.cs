@@ -2589,6 +2589,28 @@ public class Ocgcore : ServantWithCardDescription
 
 
     public Servant returnServant;
+
+    /// <summary>
+    /// 天梯「回环」：匹配态下把返回目标钉在竞技场界面（对齐 hex 版 ygopro2 的同名方法）。
+    ///
+    /// 为什么需要：本客户端原来只有「进入某界面时记下 returnServant」这一半，
+    /// 打完一局天梯 / 匹配中掉线时没有任何地方把它指回 mycard ⇒ 玩家被丢回服务器列表，
+    /// 而竞技场那边还停在「匹配中」。补上这一半就闭合了。
+    ///
+    /// ⛔ 只在 isMatching 为真时改 returnServant，非匹配态一律不动：
+    ///    ours 的 returnServant 另有多处语义 —— Room.StocMessage_ChangeSide 指向 deckManager
+    ///    （换副卡组后回卡组界面）、AIRoom.launch 指向 aiRoom（人机局）、precy 指向 puzzleMode、
+    ///    SelectServer.show 指向 selectServer。无条件覆盖会把它们全部带偏，
+    ///    尤其人机局（AIRoom）也复用 TcpHelper 的断线路径，一旦被改就回不到人机界面。
+    /// </summary>
+    public void setDefaultReturnServant()
+    {
+        if (Program.I().mycard != null && Program.I().mycard.isMatching)
+        {
+            returnServant = Program.I().mycard;
+        }
+    }
+
     public void returnTo()
     {
         TcpHelper.SaveRecord();
@@ -2612,6 +2634,9 @@ public class Ocgcore : ServantWithCardDescription
     {
         QuickTestTrace.Exit("ocgcore.onExit isShowed=" + isShowed
             + " returnServant=" + (returnServant != null ? returnServant.GetType().Name : "null"));
+        // 天梯回环（打完一局离开决斗的那条路）：先把返回目标钉住再关连接。
+        // ⛔ 必须排在关 tcpClient 之前 —— 关掉之后 TcpHelper 的断线分支会再走一遍界面切换。
+        setDefaultReturnServant();
         if (TcpHelper.tcpClient != null)
         {
             if (TcpHelper.tcpClient.Connected)

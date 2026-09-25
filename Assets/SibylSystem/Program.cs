@@ -87,17 +87,7 @@ public class Program : MonoBehaviour
     public GameObject new_ui_setting;
     public GameObject new_ui_book;
     public GameObject new_ui_selectServer;
-    // ⚠ 占位字段，**不要删**。
-    //
-    // Unity 的 MonoBehaviour 序列化数据是按字段声明顺序读写的（字段名不进数据流），
-    // 而这个字段后面跟着 new_ui_gameInfo / new_ui_cardDescription / … / remaster_* 一长串
-    // UnityEngine.Object 引用。少一个字段，后面整块就错位：运行期会打印
-    // 「A scripted object (probably Program?) has a different serialization layout
-    //  when loading」，然后那批引用全部读成 null —— 表现为 selectDeck 构造时空引用、
-    // 主菜单永远不显示，卡在启动画面。
-    //
-    // 本版不使用它，只求把位置占住。字段名可以随意改（名字不参与序列化）。
-    public GameObject new_ui_legacySlot;
+    public GameObject new_ui_mycard;
     public GameObject new_ui_gameInfo;
     public GameObject new_ui_cardDescription;
     public GameObject new_ui_search;
@@ -1773,6 +1763,7 @@ public class Program : MonoBehaviour
     public DeckManager deckManager;
     public Ocgcore ocgcore;
     public SelectServer selectServer;
+    public MyCard mycard;
     public Book book;
     public puzzleMode puzzleMode;
     public AIRoom aiRoom;
@@ -1796,7 +1787,8 @@ public class Program : MonoBehaviour
         servants.Add(ocgcore);
         selectServer = new SelectServer();
         servants.Add(selectServer);
-
+        mycard = new MyCard();
+        servants.Add(mycard);
         book = new Book();
         servants.Add(book);
         selectReplay = new selectReplay();
@@ -1845,7 +1837,10 @@ public class Program : MonoBehaviour
         {
             selectServer.hide();
         }
-
+        if (to != mycard && mycard.isShowed)
+        {
+            mycard.hide();
+        }
         if (to != selectReplay && selectReplay.isShowed)
         {
             selectReplay.hide();
@@ -1868,6 +1863,7 @@ public class Program : MonoBehaviour
         if (to == deckManager && deckManager.isShowed == false) deckManager.show();
         if (to == ocgcore && ocgcore.isShowed == false) ocgcore.show();
         if (to == selectServer && selectServer.isShowed == false) selectServer.show();
+        if (to == mycard && mycard.isShowed == false) mycard.show();
         if (to == selectReplay && selectReplay.isShowed == false) selectReplay.show();
         if (to == puzzleMode && puzzleMode.isShowed == false) puzzleMode.show();
         if (to == aiRoom && aiRoom.isShowed == false) aiRoom.show();

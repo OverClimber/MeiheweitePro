@@ -224,8 +224,8 @@ public class SelectServer : WindowServantSP
         defaults.Add(new ServerEntry { name = "233正式1区", ip = "s1.ygo233.com", port = "233" });
         defaults.Add(new ServerEntry { name = "233正式2区", ip = "s2.ygo233.com", port = "233" });
         defaults.Add(new ServerEntry { name = "233约战区", ip = "s1.ygo233.com", port = "2333" });
-        defaults.Add(new ServerEntry { name = "正式+超先行服", ip = "mygo.superpre.pro", port = "888" });
-        defaults.Add(new ServerEntry { name = "正式+超先行2服", ip = "mygo2.superpre.pro", port = "888" });
+        defaults.Add(new ServerEntry { name = "萌卡直连正式+超先行服", ip = "mygo.superpre.pro", port = "888" });
+        defaults.Add(new ServerEntry { name = "萌卡直连正式+超先行2服", ip = "mygo2.superpre.pro", port = "888" });
         defaults.Add(new ServerEntry { name = "EXP娱乐服", ip = "e.ygo.pro", port = "23333" });
         defaults.Add(new ServerEntry { name = "决斗编年史", ip = "duels.link", port = "2333" });
         defaults.Add(new ServerEntry { name = "2Pick轮抽", ip = "2pick.moecube.com", port = "765" });
@@ -1559,6 +1559,13 @@ public class SelectServer : WindowServantSP
                 Config.Set(LastPortKeyNow, portString);
                 RefreshHistoryPopup();
                 RefreshPswSuggestions();
+                // 手动从服务器列表进服 = 退出天梯会话（对齐 hex 版 SelectServer 里同一位置的
+                // mycard.isMatching = false）。不清的话，这一局打完/掉线时
+                // Ocgcore.setDefaultReturnServant 会把你拨回竞技场界面而不是服务器列表。
+                if (Program.I().mycard != null)
+                {
+                    Program.I().mycard.isMatching = false;
+                }
                 (new Thread(() => { TcpHelper.join(ipString, name, portString, pswString,versionString); })).Start();
             }
             else

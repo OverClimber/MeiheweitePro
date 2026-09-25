@@ -10,7 +10,7 @@ using UnityEngine;
 /// 思路与 KoishiPro2(iOS) 的 UpdateClientCoroutine 一致，落地路径按本工程口径：
 ///   · UnityFileDownloader.DownloadFileWithHeadCheck 负责：HEAD 取 ETag → 与本地 "&lt;文件&gt;.etag"
 ///     比对 → 只有真的变了才下到 .tmp → 交给真解析器校验 → 原子替换 + 写回 .etag。
-///     该 CDN 的 ETag 实测就是文件 MD5，所以这一层等于「按内容判增量」。
+///     萌卡 CDN 的 ETag 实测就是文件 MD5，所以这一层等于「按内容判增量」。
 ///   · 替换前把旧文件快照进 updates/basic-data-transaction-v1/：ready.txt 存在 = 事务进行中，
 ///     下次启动发现即整体回滚（断电 / 崩溃自愈）。成功才删掉 ready 标记提交。
 ///   · 状态机 + 主菜单 version_ 标签实时显示，启动即跑，不需要点按钮。
@@ -52,7 +52,7 @@ public static class ClientDataUpdater
         }
     }
 
-    /// <summary>远端数据源，与 KoishiPro2 客户端默认下载源相同。</summary>
+    /// <summary>远端数据源。萌卡 CDN，与 KoishiPro2 客户端默认下载源相同。</summary>
     const string ContentRoot = "https://cdntx2.moecube.com/koishipro/content/";
 
     const string TransactionDirectory = "updates/basic-data-transaction-v1";
