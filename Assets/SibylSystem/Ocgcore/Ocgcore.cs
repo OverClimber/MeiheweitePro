@@ -2996,8 +2996,8 @@ public class Ocgcore : ServantWithCardDescription
     public void shiftCondition(Condition condition)
     {
         this.condition = condition;
-        // 换条件会整套换掉工具条（SetBar），撤回按钮随之消失，所以这里放开重新建。
-        undoButtonCreated = false;
+        // 撤回按钮已迁到右侧 gameInfo 哈希按钮组，由 undoButtonTick 每拍自愈同步，
+        // 工具条整体换掉也不影响它 —— 不再需要「放开重建」的置位。
         // 自测开关（qt_undo.on）一局只按一次：换条件意味着新的一局，重新放行。
         undoAutoFired = false;
         switch (condition)
@@ -3069,6 +3069,33 @@ public class Ocgcore : ServantWithCardDescription
         string[] names = new string[] { "undo_", "left_", "right_", "go_", "stop_", "rush_" };
         for (int i = 0; i < names.Length; i++)
         {
+            if (names[i] == "undo_")
+            {
+                // 撤回按钮已迁出工具条：改查 gameInfo 哈希按钮（hash="undo"）。
+                // 输出格式保持 `[btnpos] undo_ screen=(x,y)`——验收判据 A/F 靠这两类行。
+                GameObject hb = null;
+                if (gameInfo != null)
+                {
+                    for (int j = 0; j < gameInfo.allHashedButtons.Count; j++)
+                    {
+                        gameUIbutton cand = gameInfo.allHashedButtons[j];
+                        if (cand != null && cand.hashString == "undo" && !cand.dying
+                            && cand.gameObject != null)
+                        {
+                            hb = cand.gameObject;
+                            break;
+                        }
+                    }
+                }
+                if (hb == null)
+                {
+                    QuickTestTrace.Log("btnpos", "undo_ = null");
+                    continue;
+                }
+                Vector3 hsp = Program.camera_main_2d.WorldToScreenPoint(ButtonWorldCenter(hb));
+                QuickTestTrace.Log("btnpos", "undo_ screen=(" + Mathf.RoundToInt(hsp.x) + "," + Mathf.RoundToInt(Screen.height - hsp.y) + ")");
+                continue;
+            }
             UIButton b = UIHelper.getByName<UIButton>(toolBar, names[i]);
             if (b == null)
             {
@@ -3088,147 +3115,245 @@ public class Ocgcore : ServantWithCardDescription
     /// <summary>上一次落盘工具条坐标的时刻（毫秒），用于每帧节流。</summary>
     int lastBarDumpMs = -1;
 
+    // ── 右侧「撤回」按钮组（gameInfo 哈希按钮）────────────────────────────────────
+    //
+    // 用户口径：撤回从底部工具条挪到界面右端，与 结束回合/战斗阶段 同款文字按钮
+    // （图标暂不变 = texture/ui/undo.png）。点击撤回后原地变成
+    // 取消回溯 / 上一步 / 下一步 / 确认回溯 四个按钮；预览期间 结束回合/进入战斗 这类
+    // 阶段操作按钮随 clearResponse 的 removeAll 收掉且不会回来（落位不含请求），
+    // 而 确认完毕/卡组记牌 照常可用（见 realize / syncDeckMemoButton）。
+    // 入口键只在「有人工决策可撤回」时出现（undoButtonTick 末尾的判据）。
+    // 点击路由：gameInfo.listenerForClicked → ES_gameUIbuttonClicked 顶部按 hashString
+    // 拦截置 pending → 本 tick（帧末）统一执行 —— NGUI 增删绝不进点击派发栈
+    // （deck_memo 的 UICamera 无限重入教训）。
+
+    /// <summary>撤回入口按钮的哈希串。</summary>
+    const string UndoHashEntry = "undo";
+
     /// <summary>
-    /// 工具条上的「撤回」按钮。
-    ///
-    /// 用户口径：图标与「上一步」(left_) 完全相同，位置摆在它**更左边**；另外 Ctrl+Z 同效。
-    /// 做法沿用卡组界面「测试」按钮那一套 —— 克隆既有按钮，插到 left_ 左边一格（工具条间距 40），
-    /// 原本占着这一格及更左边的控件（chat_ / input_ 容器）整体左移让位。
-    ///
-    /// 图标虽然和 left_ 长得一样，但**不再共用 left_ 那张图**：克隆后会把图标换成
-    /// texture/ui/undo.png（= left.png 的独立副本），每个按钮各持一份，互不干扰。
-    ///
-    /// 撤回是人机对局专有功能（联机时对手已经看到你的操作，退不回去），
-    /// 所以只在人机对局里建这个按钮 —— 卡组界面的「测试」与主菜单的「人机对战」
-    /// 都算，判据见 <see cref="DuelUndo.IsUndoableDuel"/>。
+    /// 预览四键的哈希串。**数组顺序 = 自上而下的排列顺序**（用户口径 2026-09-26）：
+    /// 上一步 → 下一步 → 取消回溯 → 确认回溯。顺序不由数组位置决定（由 order 决定），
+    /// 这里保持同序只为读代码时一目了然。
     /// </summary>
-    void tryCreateUndoButton()
+    static readonly string[] UndoHashPreview = { "undo_prev", "undo_next", "undo_cancel", "undo_confirm" };
+
+    /// <summary>
+    /// 撤回组的排布基准 order（入口占用 base，四键占 base+1..base+4）。
+    /// 取 10（比常规文字按钮的 100~122 更小 = 更靠上）：用户口径 2026-09-26 ——
+    /// 「撤回按钮和撤回状态的四个按钮排序应该最高，比右边其他按钮都高」。
+    /// order 升序 ⇒ 数值小的排最上面（排布公式 -145 - rank*50）。
+    /// </summary>
+    const int UndoOrderBase = 10;
+
+    /// <summary>点击派发攒下的预览动作（0 无 / 1 enter / 2 prev / 3 next / 4 confirm / 5 cancel）。</summary>
+    int undoPreviewPending = 0;
+
+    /// <summary>
+    /// 撤回按钮组的每拍自愈同步（帧末执行，挂点见 preFrameFunction）。
+    /// clearResponse/removeAll 每条请求消息都会清一次哈希按钮，这里下一拍补回 ——
+    /// 与 结束回合 按钮的「删了再建」同一生命周期，弹入动画也一致。
+    /// </summary>
+    void undoButtonTick()
     {
-        if (undoButtonCreated || toolBar == null)
+        if (gameInfo == null)
         {
             return;
         }
-        if (!DuelUndo.IsUndoableDuel)
+        if (condition != Condition.duel)
         {
+            // keepOnClear 让撤回组躲过每次应答的 removeAll ⇒ 离开对局时必须显式摘，
+            // 否则会 sticky 留在屏幕上（收尾 / 换备 / 退出 / 判负都可能走到这里）。
+            RemoveUndoButtons();
             return;
         }
-        Transform leftT = toolBar.transform.Find("left_");
-        if (leftT == null || toolBar.transform.Find("undo_") != null)
+        // 1) 先消化点击派发攒下的动作（此刻派发栈早已退净，增删 NGUI 安全）。
+        int act = undoPreviewPending;
+        if (act != 0)
         {
-            return;
-        }
-        GameObject undoBtn = UnityEngine.Object.Instantiate(leftT.gameObject);
-        undoBtn.name = "undo_";
-        undoBtn.transform.SetParent(toolBar.transform, false);
-
-        // Instantiate 会把 left_ 在运行时加进 UIEventTrigger 的委托（hinter.Start 挂的
-        // 悬停提示）一起复制过来；克隆体的 hinter.Start 随后会再挂一遍 → 每次悬停
-        // in_() 触发两次、造出两个提示框，而出悬停只淡出一个，另一个要在屏幕上
-        // 赖好几秒才消失（用户实测：撤回按钮的提示「一直挂着」）。
-        // 这里先把复制来的委托清掉，hinter.Start 会重新挂回唯一的一份。
-        UIEventTrigger undoTrigger = undoBtn.GetComponent<UIEventTrigger>();
-        if (undoTrigger != null)
-        {
-            undoTrigger.onHoverOver.Clear();
-            undoTrigger.onHoverOut.Clear();
-            undoTrigger.onPress.Clear();
-        }
-
-        const float ToolBarSpacing = 40f;
-        Vector3 p = leftT.localPosition;
-        float undoX = p.x - ToolBarSpacing;
-        foreach (Transform child in toolBar.transform)
-        {
-            if (child == undoBtn.transform)
+            undoPreviewPending = 0;
+            switch (act)
             {
-                continue;
-            }
-            Vector3 c = child.localPosition;
-            if (c.x <= undoX + 0.01f)
-            {
-                child.localPosition = new Vector3(c.x - ToolBarSpacing, c.y, c.z);
+                case 1: DuelUndoPreview.Enter(); break;
+                case 2: DuelUndoPreview.StepBack(); break;
+                case 3: DuelUndoPreview.StepForward(); break;
+                case 4: DuelUndoPreview.Confirm(); break;
+                case 5: DuelUndoPreview.Cancel(); break;
             }
         }
-        undoBtn.transform.localPosition = new Vector3(undoX, p.y, p.z);
-
-        // registEvent 内部会先 onClick.Clear()，所以克隆带过来的 left_ 那个
-        // 「book」回调会被替换掉，不会出现「点撤回顺手把书翻开」。
-        UIHelper.registEvent(toolBar, "undo_", on_undo);
-
-        hinter hint = undoBtn.GetComponent<hinter>();
-        if (hint != null)
+        // 2) 按状态同步按钮组。queryHashedButtonAny：退场中的也算在，防同格叠影。
+        if (DuelUndoPreview.active)
         {
-            hint.str = InterString.Get("撤回");
+            if (gameInfo.queryHashedButton(UndoHashEntry))
+            {
+                gameInfo.removeHashedButton(UndoHashEntry);
+            }
+            // 四键**常驻**（进预览即挂满四个档位），可用性只切 slotHold：
+            // 退到最早点 / 回到最新点时对应键「留槽不显示」，其余三键的 y 纹丝不动。
+            // 用户口径 2026-09-26：自上而下固定 上一步/下一步/取消回溯/确认回溯，隐藏不许乱序。
+            SyncPreviewButton(UndoHashPreview[0], DuelUndoPreview.CanStepBack, UndoOrderBase + 1, delegate
+            {
+                gameUIbutton prev = gameInfo.addHashedButton(UndoHashPreview[0], -203, superButtonType.see,
+                    InterString.Get("上一步@ui"), UndoOrderBase + 1, false, true);
+                SetUndoButtonTexture(prev, "undo");
+            });
+            SyncPreviewButton(UndoHashPreview[1], DuelUndoPreview.CanStepForward, UndoOrderBase + 2, delegate
+            {
+                gameUIbutton next = gameInfo.addHashedButton(UndoHashPreview[1], -204, superButtonType.see,
+                    InterString.Get("下一步@ui"), UndoOrderBase + 2, false, true);
+                SetUndoButtonTexture(next, "right");
+            });
+            SyncPreviewButton(UndoHashPreview[2], true, UndoOrderBase + 3, delegate
+            {
+                gameInfo.addHashedButton(UndoHashPreview[2], -202, superButtonType.no,
+                    InterString.Get("取消回溯@ui"), UndoOrderBase + 3, false, true);
+            });
+            SyncPreviewButton(UndoHashPreview[3], true, UndoOrderBase + 4, delegate
+            {
+                gameInfo.addHashedButton(UndoHashPreview[3], -205, superButtonType.yes,
+                    InterString.Get("确认回溯@ui"), UndoOrderBase + 4, false, true);
+            });
         }
-
-        // 图标换成**自己的一份独立素材**：texture/ui/undo.png（内容 = left.png 的副本）。
-        // 撤回按钮是从 left_ 克隆来的，图标原本跟着 left_ 那张图走；改成独立一份之后，
-        // 以后单独调撤回的图标不会连带把 left_ 一起改掉 —— 与卡组界面「测试」按钮
-        // （texture/ui/test.png = go.png 的副本）同一个口径：每个按钮各持一份，互不干扰。
-        UITexture undoTex = null;
-        string uiTexDump = "";
-        foreach (UITexture t in undoBtn.GetComponentsInChildren<UITexture>(true))
+        else
         {
-            if (uiTexDump.Length > 0)
+            // 退出预览：四键必须**显式**摘（keepOnClear 让它们不会被 removeAll 收走）。
+            for (int i = 0; i < UndoHashPreview.Length; i++)
             {
-                uiTexDump += "|";
+                if (gameInfo.queryHashedButton(UndoHashPreview[i]))
+                {
+                    gameInfo.removeHashedButton(UndoHashPreview[i]);
+                }
             }
-            uiTexDump += (t.path == null || t.path.Length == 0) ? "(空)" : t.path;
-            if (undoTex == null)
+            if (DuelUndo.IsUndoableDuel && !DuelUndo.active
+                && DuelTimeline.LastManualIndex() >= 0)
             {
-                undoTex = t;
+                if (!gameInfo.queryHashedButtonAny(UndoHashEntry))
+                {
+                    // 「有可以撤回的操作」才挂入口键（用户口径 2026-09-26）：开局还没做过
+                    // 任何人工决策、或真撤回会话（重开+追赶）进行中，右侧都不出现撤回键。
+                    AddUndoEntryButton();
+                }
             }
-        }
-        if (undoTex != null)
-        {
-            undoTex.path = "undo";
-            Texture2D undoIcon = GameTextureManager.get("undo");
-            if (undoIcon != null)
+            else if (gameInfo.queryHashedButton(UndoHashEntry))
             {
-                undoTex.mainTexture = undoIcon;
-            }
-        }
-        // 落盘「换成功没有」的硬证据（工具条压在卡图上、还是半透明的，截图形状判不出来，
-        // 所以判据走这里）：贴图非空 + 与 left 那张**不是同一个实例**。
-        string texAfter = "null";
-        if (undoTex != null)
-        {
-            Texture2D bound = undoTex.mainTexture as Texture2D;
-            if (bound == null)
-            {
-                texAfter = "(空)";
-            }
-            else
-            {
-                texAfter = bound.width + "x" + bound.height
-                    + " sameAsLeft=" + (GameTextureManager.get("left") == bound);
+                // 条件不再满足（真撤回会话已开始 / 换局 / 已无人工决策）：入口键也要显式摘。
+                gameInfo.removeHashedButton(UndoHashEntry);
             }
         }
-
-        undoButtonCreated = true;
-        // 顺带把它的屏幕坐标也报出来：验收脚本要能真的点到这个键（坐标不能靠猜）。
-        Vector3 usp = Program.camera_main_2d.WorldToScreenPoint(undoBtn.transform.position);
-        QuickTestTrace.Log("undo", "created undo button localPos=" + undoBtn.transform.localPosition
-            + " leftPos=" + leftT.localPosition
-            + " screen=(" + Mathf.RoundToInt(usp.x) + "," + Mathf.RoundToInt(Screen.height - usp.y) + ")"
-            + " texture=" + (undoTex != null ? undoTex.path : "null")
-            + " texAfter=" + texAfter
-            + " uiTexBefore=" + uiTexDump
-            + " toolbarChildren=" + toolBar.transform.childCount);
     }
 
-    /// <summary>是否已经建过撤回按钮（避免每帧去 Find）。</summary>
-    bool undoButtonCreated = false;
+    /// <summary>
+    /// 显式摘掉撤回组（入口 + 四键）。keepOnClear 让它们躲过每次应答的 removeAll，
+    /// 所以「离开对局 / 整场清场」这类场合必须主动清理，否则会 sticky 留在屏幕上。
+    /// </summary>
+    void RemoveUndoButtons()
+    {
+        if (gameInfo == null)
+        {
+            return;
+        }
+        if (gameInfo.queryHashedButton(UndoHashEntry))
+        {
+            gameInfo.removeHashedButton(UndoHashEntry);
+        }
+        for (int i = 0; i < UndoHashPreview.Length; i++)
+        {
+            if (gameInfo.queryHashedButton(UndoHashPreview[i]))
+            {
+                gameInfo.removeHashedButton(UndoHashPreview[i]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 右侧「撤回」入口按钮。图标沿用 undo.png（独立一份，与 left_ 不共图，口径不变）。
+    /// </summary>
+    void AddUndoEntryButton()
+    {
+        gameUIbutton b = gameInfo.addHashedButton(UndoHashEntry, -201, superButtonType.see,
+            InterString.Get("撤回@ui"), UndoOrderBase, false, true);
+        SetUndoButtonTexture(b, "undo");
+        QuickTestTrace.Log("undo", "created undo button (hashed) response=-201 order=" + UndoOrderBase);
+    }
+
+    /// <summary>
+    /// 预览键的单键同步：四键**只挂不摘、也永不隐藏**——
+    ///   ・不在场 → 挂上；
+    ///   ・在场   → 只切「可用 / 灰键」。
+    /// 「不可用」不再走 slotHold 隐藏，而是**原地变灰 + 拦下点击 + 悬停鼠标旁提示**
+    ///（用户口径 2026-09-26 第 1 条：不可用时不许消失，位置也不许动）。
+    /// 绝不能在这里 removeHashedButton：销毁后再挂回会被排到列尾，顺序就乱了
+    ///（上一轮报的「隐藏后排序乱」根因）。
+    /// </summary>
+    void SyncPreviewButton(string hash, bool wanted, int order, Action create)
+    {
+        if (!gameInfo.queryHashedButtonAny(hash))
+        {
+            create();
+            gameInfo.setHashedButtonDisabled(hash, !wanted, wanted ? "" : MissingHintOf(hash));
+            QuickTestTrace.Log("undo", "preview button " + hash + " created order=" + order
+                + " enabled=" + wanted);
+            return;
+        }
+        gameInfo.setHashedButtonDisabled(hash, !wanted, wanted ? "" : MissingHintOf(hash));
+    }
+
+    static string undoHintNoPrev = null;
+    static string undoHintNoNext = null;
+
+    /// <summary>
+    /// 灰键的悬停文案。懒翻译（只有真用到才查表）—— SyncPreviewButton 每帧都会走，
+    /// 把 InterString.Get 写在调用点等于每帧查两次表。
+    /// </summary>
+    static string MissingHintOf(string hash)
+    {
+        if (hash == UndoHashPreview[0])
+        {
+            if (undoHintNoPrev == null) undoHintNoPrev = InterString.Get("没有上一步了@ui");
+            return undoHintNoPrev;
+        }
+        if (hash == UndoHashPreview[1])
+        {
+            if (undoHintNoNext == null) undoHintNoNext = InterString.Get("没有下一步了@ui");
+            return undoHintNoNext;
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// 把哈希按钮的图标换成 texture/ui/ 下的指定贴图（沿用旧 tryCreateUndoButton 的换图口径：
+    /// UITexture.path 与 mainTexture 一起换，保证之后经 GameTextureManager 的重载也拿对）。
+    /// </summary>
+    void SetUndoButtonTexture(gameUIbutton b, string texName)
+    {
+        if (b == null || b.gameObject == null)
+        {
+            return;
+        }
+        iconSetForButton ic = b.gameObject.GetComponent<iconSetForButton>();
+        Texture2D t = GameTextureManager.get(texName);
+        if (ic != null && ic.UITextureInButton != null && t != null)
+        {
+            ic.UITextureInButton.path = texName;
+            ic.UITextureInButton.mainTexture = t;
+        }
+    }
 
     void on_undo()
     {
         QuickTestTrace.Log("undo", "on_undo clicked: decisions=" + DuelTimeline.decisions.Count
             + " lastManual=" + DuelTimeline.LastManualIndex());
-        DuelUndo.Request();
+        // 「先演示、再确认」：进预览模式（纯客户端落点演示），确认后才走真撤回。
+        // 预览中再按 = 再退一步（延续旧「连按撤回 = 多退一格」的手感）。
+        DuelUndoPreview.Enter();
     }
 
     void on_left()
     {
+        // 撤回预览中拒绝世界线回看：两套重放的数据源不同（快照 vs 实时包历史），互踩会错乱。
+        if (DuelUndoPreview.active)
+        {
+            return;
+        }
         QuickTestTrace.Log("undo", "on_left enter: condition=" + condition
             + " keys=" + keys.Count + " Packages_ALL=" + Packages_ALL.Count
             + " currentMessageIndex=" + currentMessageIndex + " paused=" + paused);
@@ -3371,6 +3496,10 @@ public class Ocgcore : ServantWithCardDescription
 
     void on_right()
     {
+        if (DuelUndoPreview.active)
+        {
+            return;   // 撤回预览中拒绝（见 on_left）
+        }
         QuickTestTrace.Log("undo", "on_right enter: keys=" + keys.Count + " Packages=" + Packages.Count);
         specialLR();
         if (right)
@@ -3403,8 +3532,12 @@ public class Ocgcore : ServantWithCardDescription
         keysTempCount = keys.Count;
     }
 
-    void on_rush()  
+    void on_rush()
     {
+        if (DuelUndoPreview.active)
+        {
+            return;   // 撤回预览中拒绝（见 on_left）：rush 会把积压的入站包一口气演掉
+        }
         specialLR();
         while (Packages.Count > 0)
         {
@@ -3441,6 +3574,10 @@ public class Ocgcore : ServantWithCardDescription
 
     void on_go()
     {
+        if (DuelUndoPreview.active)
+        {
+            return;   // 撤回预览中拒绝（与 on_stop 成对）
+        }
         paused = false;
         if (condition == Condition.duel)
         {
@@ -3457,6 +3594,10 @@ public class Ocgcore : ServantWithCardDescription
 
     void on_stop()
     {
+        if (DuelUndoPreview.active)
+        {
+            return;   // 撤回预览中拒绝：theWorld 暂停态与预览会话的收尾逻辑会互相干扰
+        }
         if (cantCheckGrave)
         {
             RMSshow_none(InterString.Get("不能确认墓地里的卡，无法跨越时间线！"));
@@ -4165,14 +4306,12 @@ public class Ocgcore : ServantWithCardDescription
         }
 
         // 撤回重放与热键放在帧末：sibyl() 已经跑完，本帧处理到的消息都算进 inbound 计数了。
-        // 撤回按钮在人机对局里按需创建（进决斗场那一刻 quickThisDuel 才是最终值，
-        // shiftCondition 时机未必可靠，所以用「建过没有」自己收敛）。
-        if (condition == Condition.duel)
-        {
-            tryCreateUndoButton();
-        }
+        // 撤回按钮组（右侧哈希按钮 + 预览四键）由 undoButtonTick 每拍自愈同步，
+        // 点击动作也在它的帧末段消化 —— NGUI 增删不进点击派发栈。
+        undoButtonTick();
         undoReplayTick();
         undoAutoTick();
+        undoPreviewAutoTick();
         undoHotkeyTick();
         // 🔑 「极大怪兽一体化」（设置项 rdMaxIntegrated_，仅 RD、默认开）：读**本帧最新**的
         //   鼠标命中（`Program.pointedGameObject` 在本帧更早处已更新），把三件齐的极大怪兽
@@ -4254,7 +4393,126 @@ public class Ocgcore : ServantWithCardDescription
         catch (System.Exception)
         {
         }
+        // ⛔ 这里保持**直撤**（DuelUndo.Request）：qt_undo.on 是撤回本体的自测通道
+        //（_verify_aiundo.py 判据咬 begin(undo)）。「先演示、再确认」的新链路由
+        // qt_undopreview.on 独立自测（见 undoPreviewAutoTick）。
         DuelUndo.Request();
+    }
+
+    /// <summary>预览自测档的一次性闩锁（qt_undopreview.on，见 <see cref="undoPreviewAutoTick"/>）。</summary>
+    bool undoPreviewAutoFired = false;
+
+    /// <summary>预览自测档的进行中的阶段（0 = 没在跑；1 = 已进预览待上一步；2 = 已上一步待取消；3 = 已取消待再进；4 = 再进预览待确认）。</summary>
+    int undoPreviewAutoStage = 0;
+
+    /// <summary>预览自测档当前阶段的起算时刻（毫秒）。</summary>
+    int undoPreviewAutoAt = 0;
+
+    /// <summary>
+    /// 自测用：log/qt_undopreview.on 里写一个数字 N，则录到第 N 个**玩家决策点**之后
+    /// 自动走一遍「先演示、再确认」全链路 —— 进预览（DuelUndoPreview.Enter）→ 3 秒后
+    /// 上一步（StepBack）→ 再 3 秒后确认（Confirm，触发真撤回的重开+追赶）。
+    /// 拍间隔 3 秒是为了给轨迹留出可判的落点行（preview enter / step / confirm）。
+    /// 只在 QuickTestTrace.Enabled（qt_debug.on）下才可能被置位，正式包零影响。
+    /// 用完即把开关写回 0（与 qt_undo.on 同一套防死循环口径）。
+    /// </summary>
+    void undoPreviewAutoTick()
+    {
+        if (!QuickTestTrace.Enabled)
+        {
+            return;
+        }
+        // ⛔ condition==duel / IsUndoableDuel 的闸只挡**触发**（阶段 0）：Enter 之后
+        //    hide() 会把 condition 置成 N、直到确认重开才回来 —— 闸放在外面的话，
+        //    阶段 1/2 永远推不进去（自动确认就永远不发生）。
+        if (undoPreviewAutoStage == 0)
+        {
+            if (condition != Condition.duel || !DuelUndo.IsUndoableDuel)
+            {
+                return;
+            }
+            if (undoPreviewAutoFired)
+            {
+                return;
+            }
+            int want = 0;
+            try
+            {
+                string p = QuickTestTrace.LogPath("qt_undopreview.on");
+                if (!QuickTestTrace.SwitchOn("qt_undopreview.on"))
+                {
+                    return;
+                }
+                int.TryParse(System.IO.File.ReadAllText(p).Trim(), out want);
+            }
+            catch (System.Exception)
+            {
+                return;
+            }
+            if (want <= 0)
+            {
+                return;
+            }
+            int have = DuelTimeline.LastManualIndex() + 1;
+            if (have < want)
+            {
+                return;
+            }
+            undoPreviewAutoFired = true;
+            try
+            {
+                System.IO.File.WriteAllText(QuickTestTrace.LogPath("qt_undopreview.on"), "0");
+            }
+            catch (System.Exception)
+            {
+            }
+            undoPreviewAutoStage = 1;
+            undoPreviewAutoAt = Program.TimePassed();
+            QuickTestTrace.Log("undo", "qt_undopreview.on -> 自动进入预览（已录到 " + have
+                + " 个玩家决策点，目标 " + want + "）");
+            DuelUndoPreview.Enter();
+            return;
+        }
+        // 阶段 1~4：按拍推进。确认之后是真撤回会话（DuelUndo.active），等它自己收尾。
+        if (DuelUndo.active)
+        {
+            return;
+        }
+        int now = Program.TimePassed();
+        if (now - undoPreviewAutoAt < 3000)
+        {
+            return;
+        }
+        if (undoPreviewAutoStage == 1)
+        {
+            undoPreviewAutoStage = 2;
+            undoPreviewAutoAt = now;
+            QuickTestTrace.Log("undo", "qt_undopreview.on -> 自动上一步");
+            DuelUndoPreview.StepBack();
+            return;
+        }
+        if (undoPreviewAutoStage == 2)
+        {
+            undoPreviewAutoStage = 3;
+            undoPreviewAutoAt = now;
+            QuickTestTrace.Log("undo", "qt_undopreview.on -> 自动取消（回归点：取消后对局必须还能继续）");
+            DuelUndoPreview.Cancel();
+            return;
+        }
+        if (undoPreviewAutoStage == 3)
+        {
+            undoPreviewAutoStage = 4;
+            undoPreviewAutoAt = now;
+            QuickTestTrace.Log("undo", "qt_undopreview.on -> 取消后再进预览（取消链路存活证明）");
+            DuelUndoPreview.Enter();
+            return;
+        }
+        if (undoPreviewAutoStage == 4)
+        {
+            undoPreviewAutoStage = 0;
+            QuickTestTrace.Log("undo", "qt_undopreview.on -> 自动确认撤回");
+            DuelUndoPreview.Confirm();
+        }
     }
 
     int lastOptionDumpMs = -1;
@@ -4660,7 +4918,8 @@ public class Ocgcore : ServantWithCardDescription
         {
             return;
         }
-        DuelUndo.Request();
+        // 与撤回按钮同一入口：先进预览演示，确认后才真撤回；预览中再按 = 再退一步。
+        DuelUndoPreview.Enter();
     }
 
     /// <summary>
@@ -4676,7 +4935,13 @@ public class Ocgcore : ServantWithCardDescription
     /// 也必须置 DuelUndo.rebuilding：这段重放**不是**真实对局，
     /// 绝不能把应答发出去、也不能记进时间线。
     /// </summary>
-    public void rebuildFromSnapshot(DuelTimeline.Snapshot snap, int upTo)
+    /// <param name="fillPackageAll">
+    /// 是否把重放的包追加进 Packages_ALL（世界线回看 left_/right_ 的数据源）。
+    /// 真撤回的本地回溯传 true（默认，行为与旧版一致：撤回点之前的历史照常可回看）；
+    /// 撤回**预览**传 false —— 预览会反复调这里，追加会把快照重放灌进实时包历史，
+    /// 取消后 on_left 的下标就全错位了。
+    /// </param>
+    public void rebuildFromSnapshot(DuelTimeline.Snapshot snap, int upTo, bool fillPackageAll = true)
     {
         bool oldSkip = inSkiping;
         inSkiping = true;
@@ -4701,8 +4966,12 @@ public class Ocgcore : ServantWithCardDescription
                 {
                     Debug.Log(e);
                 }
-                // 世界线回看（left_/right_）要的包队列，照正常路径一起铺好。
-                Packages_ALL.Add(p);
+                // 世界线回看（left_/right_）要的包队列，照正常路径一起铺好
+                //（预览重放不铺，见 fillPackageAll 参数说明）。
+                if (fillPackageAll)
+                {
+                    Packages_ALL.Add(p);
+                }
                 made++;
             }
             result = duelResult.disLink;
@@ -4718,6 +4987,99 @@ public class Ocgcore : ServantWithCardDescription
             + " keys=" + keys.Count + " currentMessageIndex=" + currentMessageIndex);
     }
 
+    // ── 撤回预览的原地重放（见 DuelUndoPreview）────────────────────────────────
+    //
+    // 预览落位/取消不再走 hide()+rebuildFromSnapshot（每步全清场重建 = 慢的根源），
+    // 改为镜像世界线回看 on_left 的「原地重放」：不销毁任何场景对象，
+    // keys/currentMessageIndex 归零后对快照流从 0 纯 logicalize，只对最后一条 practicalize。
+    // 数据源是快照（snap.MakePackage），实时包历史 Packages_ALL 与待处理队列 Packages
+    // 一概不碰 —— 预览期间新到的入站包原样积压在 Packages，取消后 sibyl 接着处理，无缝续播。
+
+    /// <summary>
+    /// 把模型原地重放到快照的第 upTo 条入站消息为止（撤回预览的落位/取消共用）。
+    ///
+    /// 与 on_left 的差别只有数据源：on_left 重放实时 Packages_ALL，这里重放快照流；
+    /// 序列完全同源 —— inSkiping 压动画、中途只 logicalize、最后一条 logicalize+
+    /// practicalize（+换视角修正），收尾 clearResponse + specialLR，
+    /// 所以步进的响应速度与流畅度和自带时间线一致。
+    ///
+    /// keepResponse（取消路径专用）：最后一条是**待应答的请求消息**，practicalize 刚把
+    /// 选择按钮/阶段碰撞盒挂出来 —— 这时绝不能再 clearResponse（它会把应答 UI 整个擦掉，
+    /// 而这条请求早已被 sibyl 处理过、不在积压队列里，没有任何东西会把它挂回来
+    /// ⇒ 玩家什么都点不了 = 对局卡死，2026-09-26 用户实测）。与 on_right
+    /// 「步进落在请求上时不清」同一口径。
+    /// </summary>
+    public void previewReplayInPlace(DuelTimeline.Snapshot snap, int upTo, bool keepResponse = false)
+    {
+        int end = Math.Min(upTo, snap.inbound.Count - 1);
+        keys.Clear();
+        currentMessageIndex = -1;
+        Program.I().book.clear();
+        bool needSwap = gameInfo.swaped;
+        inSkiping = true;
+        try
+        {
+            for (int i = 0; i <= end; i++)
+            {
+                Package p = snap.MakePackage(i);
+                currentMessage = (GameMessage)p.Fuction;
+                try
+                {
+                    logicalizeMessage(p);
+                }
+                catch (Exception e)
+                {
+                    Debug.Log(e);
+                }
+                if (i == end)
+                {
+                    if (needSwap)
+                    {
+                        GCS_swapALL(false);
+                    }
+                    try
+                    {
+                        practicalizeMessage(p);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.Log(e);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            inSkiping = false;
+        }
+        // 清掉残留的选择 UI（卡片选项按钮 / 确认窗 / 阶段碰撞盒），顺带 realize+toNearest；
+        // 内部的 gameInfo.removeAll() 会把右侧旧哈希按钮（结束回合等）一并收掉。
+        // 取消路径（keepResponse）：末条 practicalize 刚挂出的正是入口那一刻的应答 UI，
+        // 清掉=卡死，必须保留（见方法头注释）。
+        if (!keepResponse)
+        {
+            clearResponse();
+        }
+        specialLR();
+        QuickTestTrace.Log("undo", "preview replay in place upTo=" + end
+            + " keys=" + keys.Count + " currentMessageIndex=" + currentMessageIndex);
+    }
+
+    /// <summary>
+    /// 预览「确认撤回」用：待处理队列里的旧服务器残留一律丢弃（重开的服务器会把这段流原样重发，
+    /// 由追赶期逐条校验），Packages_ALL 铺成「撤回点之前的录制前缀」——
+    /// 世界线回看（on_left）在新线上仍能从开局重放，且下标与 keys 对齐。
+    /// </summary>
+    public void ResetPackagesForUndoConfirm(List<Package> replayPrefix)
+    {
+        Packages.Clear();
+        Packages_ALL.Clear();
+        if (replayPrefix != null)
+        {
+            Packages_ALL.AddRange(replayPrefix);
+        }
+    }
+
     void sibyl()
     {
         try
@@ -4726,6 +5088,13 @@ public class Ocgcore : ServantWithCardDescription
             while (true)
             {
                 if (Packages.Count == 0)
+                {
+                    break;
+                }
+                // 撤回预览：对局画面正被预览会话接管，新到的入站包**只积压、不处理、不进时间线**
+                // —— 时间线必须停在预览入口快照处，确认/取消的落点换算才成立
+                //（见 DuelUndoPreview。取消后这里自然放行，积压包照常处理+录制）。
+                if (DuelUndoPreview.active)
                 {
                     break;
                 }
@@ -7109,7 +7478,7 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (ep == 1)
                 {
-                    gameInfo.addHashedButton("", 3, superButtonType.ep, InterString.Get("结束回合@ui"));
+                    gameInfo.addHashedButton("", 3, superButtonType.ep, InterString.Get("结束回合@ui"), 101, false, false);
                     gameField.retOfEp = 3;
                     gameField.Phase.colliderEp.enabled = true;
                 }
@@ -7273,13 +7642,13 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (ep2 == 1)
                 {
-                    gameInfo.addHashedButton("", 7, superButtonType.ep, InterString.Get("结束回合@ui"));
+                    gameInfo.addHashedButton("", 7, superButtonType.ep, InterString.Get("结束回合@ui"), 101, false, false);
                     gameField.retOfEp = 7;
                     gameField.Phase.colliderEp.enabled = true;
                 }
                 if (shuffle == 1)
                 {
-                    gameInfo.addHashedButton("", 8, superButtonType.change, InterString.Get("洗切手牌@ui"));
+                    gameInfo.addHashedButton("", 8, superButtonType.change, InterString.Get("洗切手牌@ui"), 102, false, false);
                 }
                 realize();
                 break;
@@ -7410,7 +7779,7 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (cancalable)
                 {
-                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"));
+                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"), 110, false, false);
                 }
                 realizeCardsForSelect();
                 if (ES_selectHint != "")
@@ -7462,7 +7831,7 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (cancalable)
                 {
-                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"));
+                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"), 110, false, false);
                 }
                 realizeCardsForSelect();
                 if (ES_selectHint != "")
@@ -7524,11 +7893,11 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (cancalable && !finishable)
                 {
-                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"));
+                    gameInfo.addHashedButton("cancleSelected", -1, superButtonType.no, InterString.Get("取消选择@ui"), 110, false, false);
                 }
                 if (finishable)
                 {
-                    gameInfo.addHashedButton("sendSelected", 0, superButtonType.yes, InterString.Get("完成选择@ui"));
+                    gameInfo.addHashedButton("sendSelected", 0, superButtonType.yes, InterString.Get("完成选择@ui"), 111, false, false);
                 }
                 realizeCardsForSelect();
                 cardsSelected.Clear();
@@ -7736,7 +8105,7 @@ public class Ocgcore : ServantWithCardDescription
                     }
                     flagForCancleChain = true;
                     RMSshow_yesOrNo("return", InterString.Get("[?]，@n是否连锁？", ES_hint), new messageSystemValue { value = "hide", hint = "yes" }, new messageSystemValue { value = "-1", hint = "no" });
-                    gameInfo.addHashedButton("cancleChain", -1, superButtonType.no, InterString.Get("取消连锁@ui"));
+                    gameInfo.addHashedButton("cancleChain", -1, superButtonType.no, InterString.Get("取消连锁@ui"), 110, false, false);
                     if (condition == Condition.record)
                     {
                         Sleep(60);
@@ -7949,7 +8318,7 @@ public class Ocgcore : ServantWithCardDescription
                 }
                 if (gameInfo.queryHashedButton("clearCounter") == false)
                 {
-                    gameInfo.addHashedButton("clearCounter", 0, superButtonType.no, InterString.Get("重新选择@ui"));
+                    gameInfo.addHashedButton("clearCounter", 0, superButtonType.no, InterString.Get("重新选择@ui"), 110, false, false);
                 }
                 realize();
                 toNearest();
@@ -8155,7 +8524,7 @@ public class Ocgcore : ServantWithCardDescription
                     }
                     if (cancelable)
                     {
-                        gameInfo.addHashedButton("cancelPlace", -1, superButtonType.no, InterString.Get("取消操作@ui"));
+                        gameInfo.addHashedButton("cancelPlace", -1, superButtonType.no, InterString.Get("取消操作@ui"), 110, false, false);
                     }
                 }
                 else
@@ -10070,7 +10439,7 @@ public class Ocgcore : ServantWithCardDescription
             {
                 if (gameInfo.queryHashedButton("sendSelected") == false)
                 {
-                    gameInfo.addHashedButton("sendSelected", 0, superButtonType.yes, InterString.Get("完成选择@ui"));
+                    gameInfo.addHashedButton("sendSelected", 0, superButtonType.yes, InterString.Get("完成选择@ui"), 111, false, false);
                 }
             }
         }
@@ -11255,6 +11624,9 @@ public class Ocgcore : ServantWithCardDescription
     /// <summary>每拍同步右侧那个按钮（挂/摘 + 两态文案切换）。</summary>
     void syncDeckMemoButton()
     {
+        // 记牌按钮在预览期间**照常可用**（用户口径 2026-09-26）：预览里可以开关记牌，
+        // 每步落位重放末尾的 clearResponse → realize → 这里都会按 deckMemoOn 重新同步，
+        // 玩家在预览里做的切换不会被撤回流程冲掉。
         if (deckMemoButtonWanted() == false)
         {
             if (deckMemoHintState != -1)
@@ -11276,7 +11648,7 @@ public class Ocgcore : ServantWithCardDescription
         if (cur == null)
         {
             // 还没有 → 挂一颗（文案按当前态给）。
-            gameInfo.addHashedButton("deck_memo", 0, superButtonType.see, deckMemoText(want));
+            gameInfo.addHashedButton("deck_memo", 0, superButtonType.see, deckMemoText(want), 121, false, false);
         }
         else
         {
@@ -12523,11 +12895,15 @@ public class Ocgcore : ServantWithCardDescription
             }
         }
 
+        // 「确认完毕」在预览期间**照常可用**（用户口径 2026-09-26）：预览里翻卡组/墓地时
+        // 一样要能收摊。落位重放末尾的 clearResponse → realize 每步都会重新同步它；
+        // 真正被隐藏的只有 结束回合/进入战斗 这类阶段操作按钮（预览落位不含请求，
+        // practicalize 不会挂它们）。
         if (someCardIsShowed)
         {
             if (gameInfo.queryHashedButton("hide_all_card") == false)
             {
-                gameInfo.addHashedButton("hide_all_card", 0, superButtonType.see, InterString.Get("确认完毕@ui"));
+                gameInfo.addHashedButton("hide_all_card", 0, superButtonType.see, InterString.Get("确认完毕@ui"), 120, false, false);
             }
         }
         else
@@ -12536,8 +12912,9 @@ public class Ocgcore : ServantWithCardDescription
         }
 
         // 「卡组记牌」按钮：紧跟「确认完毕」之后同步一次。
-        // 右侧按钮栏是按 HashedButtons 列表顺序自上而下排的（gameInfo.cs:142 的 `-145 - j*50`），
-        // 所以在这里 add 出来的那一颗正好落在「确认完毕」下面、「转换视角」上面。
+        // 右侧按钮栏按 gameUIbutton.order 作主键、挂载序作次键自上而下排（gameInfo.Update），
+        // 所以这里给 确认完毕=120 / 卡组记牌=121 / 转换视角=122 —— 三者的相对顺序与插入时机无关，
+        // 恒为「确认完毕 → 卡组记牌 → 转换视角」（2026-09-26 用户口径：其他按钮也要保证排序稳定）。
         // `someCardIsShowed` 刚在上面算完，这里读才是本拍的值。
         syncDeckMemoButton();
 
@@ -12545,7 +12922,7 @@ public class Ocgcore : ServantWithCardDescription
         {
             if (gameInfo.queryHashedButton("swap") == false)
             {
-                gameInfo.addHashedButton("swap", 0, superButtonType.change, InterString.Get("转换视角@ui"));
+                gameInfo.addHashedButton("swap", 0, superButtonType.change, InterString.Get("转换视角@ui"), 122, false, false);
             }
         }
         else
@@ -13550,6 +13927,11 @@ public class Ocgcore : ServantWithCardDescription
 
     public override void hide()
     {
+        // 对局被整场清掉（收尾/换备/退出/判负）时，撤回预览若还挂着就静默拆除
+        //（预览的落位/取消已改为原地重放、不走 hide()，这里只会由真实清场触发）。
+        DuelUndoPreview.OnDuelHidden();
+        // 撤回组是 keepOnClear：整场清场时 removeAll 收不走它们，必须顺手显式摘掉。
+        RemoveUndoButtons();
         Program.I().cardDescription.shiftCardShower(true);
         InAI = false;
         MessageBeginTime = 0;
@@ -13770,6 +14152,27 @@ public class Ocgcore : ServantWithCardDescription
 
     public void ES_gameUIbuttonClicked(gameUIbutton btn)
     {
+        // 撤回按钮组（右侧哈希按钮）：只认 hashString，不占真实 response 空间。
+        // 这里只置待办，真正的进预览/步进/确认/取消在帧末 undoButtonTick 执行 ——
+        // 这些动作会增删 NGUI 按钮，绝不能在点击派发栈里做（见 deck_memo 分支的教训）。
+        switch (btn.hashString)
+        {
+            case "undo":
+                undoPreviewPending = 1;
+                return;
+            case "undo_prev":
+                undoPreviewPending = 2;
+                return;
+            case "undo_next":
+                undoPreviewPending = 3;
+                return;
+            case "undo_confirm":
+                undoPreviewPending = 4;
+                return;
+            case "undo_cancel":
+                undoPreviewPending = 5;
+                return;
+        }
         if (btn.hashString == "clearCounter")
         {
             for (int i = 0; i < allCardsInSelectMessage.Count; i++)
@@ -13971,6 +14374,13 @@ public class Ocgcore : ServantWithCardDescription
         if (DuelUndo.BlockInput && !DuelUndo.replayingResponse)
         {
             QuickTestTrace.Log("undo", "input dropped: session rebuilding, msg=" + currentMessage);
+            return;
+        }
+        // 闸门三：撤回预览中 —— 眼前的盘面是预览重建出来的「过去」，从这里点出的应答
+        // 指向的是历史时刻，一律丢弃（确认/取消由预览条按钮负责，见 DuelUndoPreview）。
+        if (DuelUndoPreview.active)
+        {
+            QuickTestTrace.Log("undo", "input dropped: preview active, msg=" + currentMessage);
             return;
         }
         if (paused) 
@@ -14370,7 +14780,7 @@ public class Ocgcore : ServantWithCardDescription
                     card.add_one_decoration(Program.I().mod_ocgcore_decoration_card_selecting, 2, Vector3.zero, "card_selecting");
                 }
                 realize();
-                gameInfo.addHashedButton("clear", 0, superButtonType.no, InterString.Get("重新输入@ui"));
+                gameInfo.addHashedButton("clear", 0, superButtonType.no, InterString.Get("重新输入@ui"), 110, false, false);
                 toNearest();
                 gameField.setHint(InterString.Get("请选择需要宣言的卡片。"));
                 break;

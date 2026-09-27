@@ -368,12 +368,29 @@ public class Room : WindowServantSP
         }
         result += msg;
         string res = "[888888]" + result + "[-]";
-        Program.I().book.add(res);
+        // 撤回重开期的聊天静音（用户口径 2026-09-26）：AI 台词 / 进房语 / 对方卡组张数
+        // 一律不上屏 —— 撤回会新起一个 WindBot，它把 welcome/duelstart 之类重发一遍，
+        // 屏内聊天框看着就像「又开了一局」。
+        // ⛔ 闸门只挡「上屏」这两处（book 消息记录 + 屏内聊天框）；
+        //    **录制必须继续**（TcpHelper.AddRecordLine 在下面，无条件保留）。
+        // ⛔ 也不能挪到 StocMessage_Chat / StocMessage_DeckCount 早退：那会连录制一起丢。
+        // ⛔ 更不能挪到 mLog：DuelUndo.Say / DuelUndoPreview.Say 也走 RMSshow_none，
+        //    会把「撤回完成。」和预览的前置校验提示一起吞掉。
+        bool chatMutedNow = DuelUndo.IsChatMuted;
+        if (!chatMutedNow)
+        {
+            Program.I().book.add(res);
+        }
         Package p = new Package();
         p.Fuction = (int)YGOSharp.OCGWrapper.Enums.GameMessage.sibyl_chat;
         p.Data = new BinaryMaster();
         p.Data.writer.WriteUnicode(res, res.Length + 1);
         TcpHelper.AddRecordLine(p);
+        if (chatMutedNow)
+        {
+            QuickTestTrace.Log("chat", "muted dropped player=" + player + " len=" + msg.Length);
+            return;
+        }
         switch ((PlayerType)player)
         {
             case PlayerType.Red:

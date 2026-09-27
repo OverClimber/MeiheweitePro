@@ -63,6 +63,83 @@ public static class DuelUndo
     /// <summary>正在吞入站包：这段流按下撤回时已经在本地回溯过了，只校验+录制，不再上屏。</summary>
     public static bool catchingUp = false;
 
+    // ── 聊天静音窗口（2026-09-26 用户口径）────────────────────────────────────
+    //
+    // 撤回重开会新起一个 WindBot，它把 welcome / duelstart 之类的台词重发一遍；
+    // 加上 StocMessage_DeckCount 的「对方主卡组：X张」，屏内聊天框看着就像「又开了一局」。
+    // 用户要求：撤回期间这些协议聊天一律不上屏（**录制不受影响**），收尾清干净后
+    // 只留一条「撤回完成。」。
+    //
+    // 闸门落在 Room.AddChatMsg 的 UI 汇聚点（TcpHelper.AddRecordLine 之后），
+    // 因为 Chat / DeckCount 走 TcpHelper 直派发、**不经过 sibyl()**，SwallowInbound 拦不到。
+
+    /// <summary>静音窗口是否开着（撤回会话期间）。</summary>
+    private static bool chatMuted = false;
+
+    /// <summary>静音窗口的收尾余量（毫秒）。见 <see cref="IsChatMuted"/>。</summary>
+    private const int ChatMuteTailMs = 1500;
+
+    /// <summary>静音兜底截止时刻：Finish 之后旧 socket 缓冲仍可能再吐一两条 Chat。</summary>
+    private static float chatUnmuteAt = 0f;
+
+    /// <summary>
+    /// 屏内聊天是否静音。不能只看 <see cref="active"/> —— Finish 把 active 置 false 之后，
+    /// 旧连接缓冲里还剩的 Chat 会迟到几百毫秒，那些尾巴必须一起挡掉（用户要的是「干净」）。
+    ///
+    /// 也不能只看 chatMuted：万一会话从某条没预料到的路退出（没走 Finish/Fail/Reset 的收尾），
+    /// 「会话进行中」这一条会立刻失效 —— 宁可少静音一次，也不能把聊天永久禁掉。
+    /// </summary>
+    public static bool IsChatMuted
+    {
+        get
+        {
+            if (chatUnmuteAt > 0f && Program.TimePassed() < chatUnmuteAt)
+            {
+                return true;                 // 收尾尾巴窗口（Finish / Fail / 分叉降级之后）
+            }
+            return chatMuted && active;      // 会话进行中
+        }
+    }
+
+    /// <summary>开静音窗口（撤回会话置位时调用）。</summary>
+    private static void EnterChatQuiet()
+    {
+        chatMuted = true;
+        chatUnmuteAt = 0f;
+        QuickTestTrace.Log("chat", "mute ON (undo session)");
+    }
+
+    /// <summary>
+    /// 关静音窗口，并留 <see cref="ChatMuteTailMs"/> 的尾巴窗口。
+    /// </summary>
+    /// <param name="clearLogs">true = 顺手清空屏内聊天框与「消息记录」（撤回收尾用；
+    /// 清完由调用方补一条「撤回完成。」—— 所以必须先清后 Say，反过来会把新消息一起清掉）。</param>
+    private static void LeaveChatQuiet(bool clearLogs)
+    {
+        chatMuted = false;
+        chatUnmuteAt = Program.TimePassed() + ChatMuteTailMs;
+        if (!clearLogs)
+        {
+            return;
+        }
+        try
+        {
+            if (Program.I() != null && Program.I().cardDescription != null)
+            {
+                Program.I().cardDescription.clearAllLog();
+            }
+            if (Program.I() != null && Program.I().book != null)
+            {
+                Program.I().book.clear();
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+        QuickTestTrace.Log("chat", "logs cleared (undo finish)");
+    }
+
     /// <summary>正在本地重建模型。此间**绝不能**发应答、也绝不能录制（会污染新一局的时间线）。</summary>
     public static bool rebuilding = false;
 
@@ -342,6 +419,8 @@ public static class DuelUndo
         active = true;
         silent = true;
         catchingUp = true;
+        // 聊天静音：新起的 WindBot 会把台词重发一遍，重开这段一律不上屏（录制照旧）。
+        EnterChatQuiet();
         // 从这里开始，旧连接的残留 GameMsg 一律丢掉，直到新一局自己的 Start 到达。
         awaitingRestartStart = true;
         sessionStartMs = Program.TimePassed();
@@ -360,6 +439,59 @@ public static class DuelUndo
 
         Say("正在回溯世界线…");
         RewindLocally();
+        Restart();
+    }
+
+    /// <summary>
+    /// 预览确认入口（见 <see cref="DuelUndoPreview"/>）：与 <see cref="BeginSession"/> 的会话置位完全一致，
+    /// 但**跳过本地重建** —— 预览的最后一步已经用 <see cref="Ocgcore.rebuildFromSnapshot"/>
+    /// 把画面画到目标点了，这里只负责「重开服务器 + 追赶 + 代打」。追赶期间收到的入站包
+    /// 照旧走 <see cref="SwallowInbound"/>：只校验+录制、不上屏。
+    ///
+    /// 速度收益就在这一跳：旧行为「按一次撤回 = 一次本地重建 + 一次重开」，退 N 步要 N 次；
+    /// 预览把 N 步的选择放在纯客户端阶段（瞬时），确认只重开一次。
+    /// </summary>
+    /// <param name="snap">预览入口摘下的时间线快照（预览期间时间线停着没动，它仍是权威）。</param>
+    /// <param name="keep">目标决策点下标（decisions 里的位置）。</param>
+    /// <param name="previewUpTo">与 keep 对应的入站流边界（预览已按它落位；这里只用于日志与分叉重建）。</param>
+    public static void ConfirmFromPreview(DuelTimeline.Snapshot snap, int keep, int previewUpTo)
+    {
+        if (active)
+        {
+            return;
+        }
+        saved = snap;
+        targetKeep = keep;
+        replayedDecisions = 0;
+        forked = false;
+        forkRetries = 0;
+        restarted = false;
+        catchIndex = 0;
+        premoveHandIndex = 0;
+        replayWholeDuel = false;
+        // 换算与 BeginSession 相同：吞 0..N-2，请求本身留给正常路径（玩家要看到选择界面）。
+        int n = snap.decisions[keep].inboundCount;
+        swallowCount = Math.Max(0, n - 1);
+        rebuildUpTo = Math.Max(-1, Math.Min(previewUpTo, snap.inbound.Count - 1));
+
+        active = true;
+        silent = true;
+        catchingUp = true;
+        EnterChatQuiet();      // 同 BeginSession：重开期的台词不上屏
+        awaitingRestartStart = true;
+        sessionStartMs = Program.TimePassed();
+        // 遮罩要盖：服务器重开 + 追赶需要时间，这段画面不动（但已是目标态，不是旧观感的「重演」）。
+        ShowMask();
+
+        QuickTestTrace.Log("undo", "confirm-preview keep=" + keep
+            + " decisions=" + snap.decisions.Count
+            + " inbound=" + snap.inbound.Count
+            + " swallow=" + swallowCount
+            + " rebuildUpTo=" + rebuildUpTo
+            + " seed=" + snap.seed
+            + " deck=" + snap.deckName);
+
+        Say("正在把对局还原到这一步…");
         Restart();
     }
 
@@ -635,6 +767,8 @@ public static class DuelUndo
         {
             rebuildSession = false;
         }
+        // 降级收尾：会话到此结束，静音窗口关掉、屏内残留抹掉，只留下面这条分叉说明。
+        LeaveChatQuiet(true);
         Say("对手走了另一条线，已停在分叉点，可以继续操作。");
     }
 
@@ -676,7 +810,7 @@ public static class DuelUndo
             {
                 if (!catchingUp)
                 {
-                    Finish("已回到上一步。");
+                    Finish("撤回完成。");
                 }
                 return null;
             }
@@ -707,7 +841,7 @@ public static class DuelUndo
         }
         if (!catchingUp)
         {
-            Finish("已回到上一步。");
+            Finish("撤回完成。");
         }
         return null;
     }
@@ -739,6 +873,9 @@ public static class DuelUndo
         {
             QuickTestTrace.Log("undo", "finish realize: " + e.Message);
         }
+        // 收尾清场：把重开期积在屏内的 AI 台词 / 进房语 / 卡组张数抹掉，只留下面这一条 message。
+        // ⛔ 顺序必须是「先清后 Say」—— 反过来会把刚打上去的收尾语一起清掉（见 LeaveChatQuiet）。
+        LeaveChatQuiet(true);
         Say(message);
     }
 
@@ -769,6 +906,8 @@ public static class DuelUndo
         catch (Exception)
         {
         }
+        // 同一口径：失败原因要留下（失败在重开之后，屏内那些台词本来就该被抹掉）。
+        LeaveChatQuiet(true);
         Say(reason);
     }
 
@@ -795,6 +934,8 @@ public static class DuelUndo
         AIRoom.forcedSeed = 0;
         AIRoom.forcedBotHand = 0;
         sessionStartMs = 0;
+        // 非人机对局/换场：把静音窗口也一起收掉，别漏到下一局去（清空历史没必要，这里只解禁）。
+        LeaveChatQuiet(false);
         HideMask();
     }
 
@@ -803,7 +944,7 @@ public static class DuelUndo
     // ── 回溯遮罩 ────────────────────────────────────────────────────────────────
     //
     // 用户口径：撤回不需要演示「从开局到撤回点」的过程，直接退过去就行；
-    // 但重建有几百毫秒，所以给一个加载圈样的遮罩。
+    // 但重建有几百毫秒，所以给一块遮罩。
     //
     // 实现照工程里既有的口径来（SuperPreList 也在运行时造 UI）：
     //   ・自建一个 UIPanel 当容器：NGUI 的面板是按 **layer** 找相机的
@@ -814,8 +955,13 @@ public static class DuelUndo
     //     不必往工程里加任何美术资源。
     //   ・尺寸不写死：从 UI 相机把「屏幕四角」换算成世界坐标量出来，
     //     分辨率/窗口大小怎么变都对得上（工程里其它 UI 也是这个换算口径）。
-    //   ・转圈是运行时画出来的一张环形贴图，靠 UndoSpinner 每帧自转。
+    //   ・中央是一块「黑框 + 白字『世界线回溯中……』」的告示牌（用户口径 2026-09-26：
+    //     原来的加载圈已删除，改成黑底白字）；黑框同样是 1x1 白图叠出来的，直角、无圆角
+    //     （白图没有九宫格，做圆角就得新增美术资源 —— 不划算）。
     //   ・顺带挂个 BoxCollider 把点击挡住：这段时间盘面还没稳，不该接受操作。
+    //
+    // 生命周期：只在「确认回溯」后的真重开+追赶期间显示（BeginSession / ConfirmFromPreview 开，
+    // OnFork 降级 / Finish / Fail / Reset 关）—— **预览期没有遮罩**（四键要能点、盘面要看得清）。
 
     /// <summary>重建的时长上限（毫秒）。超过就放弃本次撤回，免得玩家对着遮罩干等。</summary>
     private const int SessionTimeoutMs = 25000;
@@ -826,9 +972,166 @@ public static class DuelUndo
     /// <summary>遮罩深度：只要求盖住对战界面（工具条那一层的 panel）与 3D 盘面即可。</summary>
     private const int MaskPanelDepth = 800;
 
-    private static readonly Color MaskColor = new Color(0.04f, 0.05f, 0.07f, 0.72f);
+    /// <summary>
+    /// 压暗层颜色。用户口径 2026-09-26 第 3 条：要「颜色很深」，一整层压在界面上。
+    /// 太浅（0.72）在深色盘面上几乎看不出来 —— 会被误判成「压暗没实现」。
+    /// </summary>
+    private static readonly Color MaskColor = new Color(0.04f, 0.05f, 0.07f, 0.88f);
 
-    private static Texture2D spinnerTex = null;
+    /// <summary>
+    /// 纯色块用的一张 1×1 白纹理（运行时自建）。
+    ///
+    /// ⛔⛔ 绝不能用 `Texture2D.whiteTexture`：本工程打包后它取不到 ⇒ **三块纯色矩形
+    ///    （压暗层 / 描边 / 黑底）全部不渲染**，而同一 panel 里的 UILabel 照常出字 ——
+    ///    真机表现就是「点了确认回溯，界面亮度毫无变化，只在屏幕中央看到一行淡淡的白字」，
+    ///    正是用户 2026-09-26 报的「压暗没实现」。探针物证：
+    ///    `mask quad … inFrustum=True drawCall=False`（quad 尺寸/位置都对、视锥也命中，
+    ///    就是不产生 drawcall），同期截图里界面亮度分毫未变。
+    ///    自建纹理由 CPU 侧创建、不依赖任何内置资源，且全局复用一份。
+    /// </summary>
+    internal static Texture2D WhiteTex()
+    {
+        if (whiteTex == null)
+        {
+            // ⛔⛔ **尺寸必须偶数**（这里用 4×4，2×2 也行）——「压暗没实现」的**真凶**之二，
+            //   而且是最隐蔽的一个：顶点填了、drawcall 建了、贴图非空、视锥也命中，
+            //   但**一个像素都不画**。原因在 NGUI 的 `UITexture.drawingDimensions`
+            //   （NGUI/Scripts/UI/UITexture.cs 第 203~244 行）：
+            //
+            //       int w = mTexture.width;  int h = mTexture.height;
+            //       if (w > 0 && h > 0 && (mType == Simple || mType == Filled))
+            //       {
+            //           if ((w & 1) != 0) ++padRight;   // ← 奇数宽就补 1 像素
+            //           if ((h & 1) != 0) ++padTop;
+            //           px = (1f / w) * mWidth;         // ← w=1 时 px 就等于整个宽度
+            //           py = (1f / h) * mHeight;
+            //       }
+            //       else x1 -= padRight * px;           // ← x1 从 x0+mWidth 退回到 x0
+            //       else y1 -= padTop * py;             // ← y1 退回到 y0
+            //
+            //   1×1 的贴图两条都命中 ⇒ 绘制矩形宽高**双双归零** ⇒ 四个顶点重合在一个点上
+            //   ⇒ 三角形面积为 0 ⇒ 不产生任何像素（但顶点确实「有」）。
+            //   于是所有探针都报「正常」：hasVerts=True / geoVerts=True / drawCall=True / tex=1x1，
+            //   只有屏幕亮度纹丝不动；同 panel 的 UILabel 不走这条路，所以只剩中央那行字。
+            //   改成偶数尺寸后 `(w&1)==0` 不成立 ⇒ 不补边距 ⇒ 矩形恢复满尺寸。
+            whiteTex = new Texture2D(4, 4, TextureFormat.RGBA32, false);
+            Color[] px = new Color[16];
+            for (int i = 0; i < px.Length; i++)
+            {
+                px[i] = Color.white;
+            }
+            whiteTex.SetPixels(px);
+            whiteTex.filterMode = FilterMode.Point;          // 会被拉到整屏，必须 Point（别插值出灰边）
+            whiteTex.wrapMode = TextureWrapMode.Clamp;
+            whiteTex.Apply();
+            QuickTestTrace.Log("undo", "white tex built " + whiteTex.width + "x" + whiteTex.height
+                + "（**必须偶数**：奇数会被 UITexture.drawingDimensions 补 1 像素边距 ⇒ 矩形归零）"
+                + " builtin whiteTexture=" + (Texture2D.whiteTexture == null ? "NULL" : "ok"));
+        }
+        return whiteTex;
+    }
+
+    private static Texture2D whiteTex = null;
+
+    /// <summary>
+    /// 找一份「确定被打进包」的 UITexture 当模板，抄它的 shader 引用。
+    ///
+    /// 这是**防御性**的一步，不是「压暗没实现」的根治手段 —— 别再把它当根因：
+    ///   · 真凶之一：`UITexture.OnStart`（下一帧才跑）里
+    ///     `if (mOutPath != "") mainTexture = GameTextureManager.get(mOutPath);`，
+    ///     运行时 new 的组件 mOutPath 是 **null ≠ ""** ⇒ mainTexture 被冲成 null
+    ///     ⇒ OnFill 直接 return ⇒ 没有顶点。修：`path = ""`。
+    ///   · 真凶之二（更隐蔽，2026-09-26 晚十一才挖出来）：白纹理是 **1×1（奇数）**，
+    ///     被 `UITexture.drawingDimensions` 补了 1 像素边距 ⇒ 绘制矩形宽高归零
+    ///     ⇒ 顶点全退化到一点。修：纹理改 4×4。见 WhiteTex()。
+    /// 本函数只负责「万一 Shader.Find 在打包工程里被剥离」这一种残余风险：
+    /// 运行时新建的 UITexture 在 mMat 为空时走 `Shader.Find("Unlit/Transparent Colored")`，
+    /// 拿不到就给不了 shader。抄一份现成的引用最稳。
+    ///
+    /// 只抄 shader、**不共享材质实例**：共用的话 NGUI 会把 drawcall 的 mainTexture 写到那块
+    /// 共用材质上，把模板自己的显示改花。
+    /// </summary>
+    internal static Shader UiTexShader()
+    {
+        if (uiTexShader == null)
+        {
+            UITexture tpl = null;
+            // ⛔ `Program.I().ocgcore` 的静态类型是 Servant（基类），gameInfo 是 Ocgcore 的字段
+            //    —— 别在这里 cast，直接用 Servant 上就有的 gameObject / toolBar，口径与
+            //    FindLabelTemplate 一致（那里也是这么找 UILabel 模板的）。
+            Servant s = Program.I() != null ? Program.I().ocgcore : null;
+            if (s != null)
+            {
+                if (s.gameObject != null)
+                {
+                    tpl = s.gameObject.GetComponentInChildren<UITexture>(true);
+                }
+                if (tpl == null && s.toolBar != null)
+                {
+                    tpl = s.toolBar.GetComponentInChildren<UITexture>(true);
+                }
+            }
+            if (tpl != null)
+            {
+                uiTexShader = tpl.shader;
+            }
+            QuickTestTrace.Log("undo", "ui tex shader=" + (uiTexShader == null ? "NULL" : uiTexShader.name)
+                + " find(Unlit/Transparent Colored)="
+                + (Shader.Find("Unlit/Transparent Colored") == null ? "NULL" : "ok"));
+        }
+        return uiTexShader;
+    }
+
+    private static Shader uiTexShader = null;
+
+    /// <summary>压暗层本身（绘制回执要看它）。</summary>
+    private static UITexture maskQuad = null;
+
+    /// <summary>
+    /// 挂上后延迟半秒报一次「压暗层到底有没有画出来」。
+    /// ShowMask 当拍读 drawCall 必然是 null（NGUI 要到下一个 LateUpdate 才重建批次），
+    /// 只有延迟读才能把「没画」和「还没建」分开。
+    /// </summary>
+    private static System.Collections.IEnumerator MaskDrawCallProbe()
+    {
+        yield return new WaitForSeconds(0.5f);
+        if (maskQuad == null)
+        {
+            yield break;
+        }
+        // 自愈兜底：万一 mainTexture 还是被别的路径冲掉了（path="" 已是根治，这里只是保险），
+        // 补一次并让它重建 —— 补完再等一拍才读 drawCall，否则读到的还是「还没建」。
+        if (maskQuad.mainTexture == null)
+        {
+            maskQuad.mainTexture = WhiteTex();
+            maskQuad.MarkAsChanged();
+            if (maskQuad.panel != null)
+            {
+                maskQuad.panel.RebuildAllDrawCalls();
+            }
+            QuickTestTrace.Log("undo", "mask quad tex was NULL -> 已补回一次");
+            yield return new WaitForSeconds(0.4f);
+            if (maskQuad == null)
+            {
+                yield break;
+            }
+        }
+        QuickTestTrace.Log("undo", "mask quad drawCall=" + (maskQuad.drawCall != null)
+            + " shader=" + (maskQuad.shader == null ? "NULL" : maskQuad.shader.name)
+            + " isVisible=" + maskQuad.isVisible
+            + " hasVerts=" + maskQuad.hasVertices
+            + " geoVerts=" + (maskQuad.geometry != null && maskQuad.geometry.hasVertices)
+            + " tex=" + (maskQuad.mainTexture == null
+                ? "NULL" : (maskQuad.mainTexture.width + "x" + maskQuad.mainTexture.height))
+            + " mat=" + (maskQuad.material == null ? "NULL" : maskQuad.material.name)
+            + " panel=" + (maskQuad.panel == null ? "null" : maskQuad.panel.name)
+            + " widgets=" + (maskQuad.panel == null ? -1 : maskQuad.panel.widgets.Count)
+            + " drawCalls=" + (maskQuad.panel == null ? -1 : maskQuad.panel.drawCalls.Count));
+    }
+
+    /// <summary>中央黑框尺寸（像素，写死即可 —— 文案固定、不长不折行）。</summary>
+    private const int FrameWidth = 460;
+    private const int FrameHeight = 120;
 
     /// <summary>UI 相机认的层（见上面的说明）。取不到就退回 11。</summary>
     private static int UiLayer()
@@ -880,11 +1183,33 @@ public static class DuelUndo
             float unit = spanY / Mathf.Max(1, Screen.height);
             Vector3 c = center / unit;                 // 屏幕中心，换算到面板局部单位
 
+            // 深度不写死：写死的 800 万一被工具条那类高层 panel 压住，压暗就会「局部不生效」。
+            //    改为运行时扫一遍全场的 UIPanel，取「最大 depth + 余量」。
+            //    此刻本遮罩的 panel 还没创建，所以不会把自己算进去。
+            // ⚠ 注意：这一条**不是**用户报的「压暗没实现」的根因（真的两根因见 WhiteTex() 与
+            //    ShowMask 末尾 path="" 那两处）；此处只是把「深度够不够」这个变量也钉死，
+            //    免得以后再被别的 panel 盖住时又要从头猜一遍。
+            int depth = MaskPanelDepth;
+            string panelList = "";
+            for (int i = 0; i < UIPanel.list.Count; i++)
+            {
+                UIPanel p = UIPanel.list[i];
+                if (p == null || p.gameObject == null)
+                {
+                    continue;
+                }
+                if (p.depth + 50 > depth)
+                {
+                    depth = p.depth + 50;
+                }
+                panelList += (panelList.Length > 0 ? " " : "") + p.name + ":" + p.depth;
+            }
+
             maskRoot = new GameObject("undo_mask");
             maskRoot.layer = UiLayer();      // 必须在 AddComponent 之前设好：面板在启用时就按层找相机
             maskRoot.transform.localScale = new Vector3(unit, unit, unit);
             UIPanel panel = maskRoot.AddComponent<UIPanel>();
-            panel.depth = MaskPanelDepth;
+            panel.depth = depth;
             panel.clipping = UIDrawCall.Clipping.None;
 
             // ① 压暗全屏（顺带当点击挡板）
@@ -894,7 +1219,7 @@ public static class DuelUndo
             quad.layer = maskRoot.layer;
             quad.transform.SetParent(maskRoot.transform, false);
             UITexture tex = quad.AddComponent<UITexture>();
-            tex.mainTexture = Texture2D.whiteTexture;
+            tex.mainTexture = WhiteTex();
             tex.color = MaskColor;
             tex.depth = 0;
             tex.SetDimensions(qw, qh);
@@ -906,19 +1231,28 @@ public static class DuelUndo
             // 射线有可能打不中）：10 个世界单位厚，稳落在相机前方。
             blocker.size = new Vector3(qw, qh, 10f / unit);
 
-            // ② 转圈（按像素写，112 ≈ 1080 高的十分之一）
-            const int ring = 112;
-            GameObject spin = new GameObject("undo_spinner");
-            spin.layer = maskRoot.layer;
-            spin.transform.SetParent(maskRoot.transform, false);
-            UITexture circle = spin.AddComponent<UITexture>();
-            circle.mainTexture = SpinnerTexture();
-            circle.depth = 1;
-            circle.SetDimensions(ring, ring);
-            spin.transform.localPosition = c;
-            spin.AddComponent<UndoSpinner>();
+            // ② 中央告示牌：外描边 → 黑底 → 白字（同一 UIPanel 内按 depth 依次压上去）
+            GameObject edge = new GameObject("undo_mask_edge");
+            edge.layer = maskRoot.layer;
+            edge.transform.SetParent(maskRoot.transform, false);
+            UITexture edgeTex = edge.AddComponent<UITexture>();
+            edgeTex.mainTexture = WhiteTex();
+            edgeTex.color = new Color(0.42f, 0.46f, 0.55f, 0.95f);   // 亮一圈描边：纯黑框压在压暗层上会糊成一片
+            edgeTex.depth = 1;
+            edgeTex.SetDimensions(FrameWidth + 6, FrameHeight + 6);
+            edge.transform.localPosition = c;
 
-            // ③ 一行字。字体模板从现成的 UILabel 上抄（不新增资源，也不改任何 prefab）。
+            GameObject frame = new GameObject("undo_mask_frame");
+            frame.layer = maskRoot.layer;
+            frame.transform.SetParent(maskRoot.transform, false);
+            UITexture frameTex = frame.AddComponent<UITexture>();
+            frameTex.mainTexture = WhiteTex();
+            frameTex.color = new Color(0.05f, 0.05f, 0.07f, 0.98f);
+            frameTex.depth = 2;
+            frameTex.SetDimensions(FrameWidth, FrameHeight);
+            frame.transform.localPosition = c;
+
+            // ③ 白字一行，居中压在黑框上。字体模板从现成的 UILabel 上抄（不新增资源，也不改任何 prefab）。
             UILabel tpl = FindLabelTemplate();
             GameObject line = new GameObject("undo_mask_text");
             line.layer = maskRoot.layer;
@@ -933,18 +1267,86 @@ public static class DuelUndo
                 lab.gradientTop = tpl.gradientTop;
                 lab.gradientBottom = tpl.gradientBottom;
             }
-            lab.text = InterString.Get("正在回溯世界线…");       // 与全工程口径一致：UI 文案统一走翻译表
-            lab.fontSize = 26;
+            lab.text = InterString.Get("世界线回溯中……");       // 与全工程口径一致：UI 文案统一走翻译表
+            lab.fontSize = 30;
             lab.alignment = NGUIText.Alignment.Center;
             lab.pivot = UIWidget.Pivot.Center;
-            lab.color = new Color(1f, 1f, 1f, 0.92f);
-            lab.depth = 2;
-            lab.SetDimensions(600, 50);
-            line.transform.localPosition = new Vector3(c.x, c.y - ring * 0.95f, c.z);
+            lab.color = Color.white;
+            lab.depth = 3;
+            lab.SetDimensions(FrameWidth - 40, 46);
+            line.transform.localPosition = c;
 
-            QuickTestTrace.Log("undo", "mask shown " + qw + "x" + qh + "px ring=" + ring
+            // 三块纯色矩形抄一份现成的 shader（见 UiTexShader 的说明 —— 这是**防御**，
+            // 不是「压暗没实现」的根因；真根因是 UITexture.OnStart 冲掉 mainTexture
+            // 与 1×1 奇数贴图被补边距导致绘制矩形归零，两处都在上面各修掉了）。
+            Shader uiShader = UiTexShader();
+            if (uiShader != null)
+            {
+                tex.shader = uiShader;
+                edgeTex.shader = uiShader;
+                frameTex.shader = uiShader;
+            }
+            // ⛔⛔ 必须把 path 清成空串 —— 这是「压暗没实现」的**真凶**：
+            //    UITexture.OnStart（对象创建后的**下一帧**才跑）里有
+            //        if (mOutPath != "") mainTexture = GameTextureManager.get(mOutPath);
+            //    而运行时 new 出来的组件 mOutPath 默认是 **null**（null != "" 为真）⇒ 这段会执行，
+            //    get(null) 返回 null ⇒ mainTexture 被冲掉 ⇒ UITexture.OnFill 里 `if (tex != null)`
+            //    不成立 ⇒ 顶点一个都不填 ⇒ hasVerts=false ⇒ panel 不建 drawcall ⇒ **纯色块全不渲染**
+            //    （同一 panel 的 UILabel 走字体自带纹理，照常出字 —— 于是屏幕上只剩一行白字）。
+            //    探针物证（挂上 0.5s 后）：`mask quad drawCall=False hasVerts=False tex=NULL mat=NULL`。
+            tex.path = "";
+            edgeTex.path = "";
+            frameTex.path = "";
+            // 兜底：自建 widget 不走 prefab 的初始化路径，NGUI 的 mChanged / panel.mRebuild
+            // 可能没被点燃。主动标脏 + 让 panel 下一拍重建 —— 两件都是便宜的幂等操作。
+            tex.MarkAsChanged();
+            edgeTex.MarkAsChanged();
+            frameTex.MarkAsChanged();
+            panel.RebuildAllDrawCalls();
+            maskQuad = tex;
+            // 延迟半秒的绘制回执（ShowMask 当拍读 drawCall 必然是 null）
+            try
+            {
+                Program.I().StartCoroutine(MaskDrawCallProbe());
+            }
+            catch (Exception)
+            {
+            }
+
+            QuickTestTrace.Log("undo", "mask shown " + qw + "x" + qh + "px frame=" + FrameWidth + "x" + FrameHeight
                 + "px unit=" + unit.ToString("F6") + " layer=" + maskRoot.layer
-                + " tpl=" + (tpl != null));
+                + " depth=" + depth + " tpl=" + (tpl != null)
+                + " cam(near=" + cam.nearClipPlane + " far=" + cam.farClipPlane
+                + " ortho=" + cam.orthographicSize + " z=" + cam.transform.position.z.ToString("F2") + ")");
+            // 排查压暗没生效时的第一手物证：全场 panel 的 depth 榜 + 压暗层在不在视锥里。
+            QuickTestTrace.Log("undo", "mask panels [" + panelList + "] base=" + MaskPanelDepth + " chosen=" + depth);
+            Vector3[] wc = tex.worldCorners;
+            Bounds wb = new Bounds(wc[0], Vector3.zero);
+            for (int i = 1; i < wc.Length; i++)
+            {
+                wb.Encapsulate(wc[i]);
+            }
+            Plane[] planes = GeometryUtility.CalculateFrustumPlanes(cam);
+            QuickTestTrace.Log("undo", "mask quad x=" + wc[0].x.ToString("F2") + ".." + wc[2].x.ToString("F2")
+                + " y=" + wc[0].y.ToString("F2") + ".." + wc[2].y.ToString("F2")
+                + " z=" + wc[0].z.ToString("F2")
+                + " size=" + wb.size.x.ToString("F1") + "x" + wb.size.y.ToString("F1")
+                + " inFrustum=" + GeometryUtility.TestPlanesAABB(planes, wb)
+                + " drawCall=" + (tex.drawCall != null) + " isVisible=" + tex.isVisible);
+            // ⛔⛔ `worldCorners`（上一行）是**按 width/height 算的**，顶点退化时它照样报满尺寸
+            //   ⇒ 光看它永远抓不到「四顶点重合、一个像素都不画」那类故障（1×1 贴图那次的教训）。
+            //   真正被填进顶点的是 `drawingDimensions`，**必须单独记**：
+            //   宽或高为 0 = 退化，等于这一块什么都没画。
+            Vector4 dd = tex.drawingDimensions;
+            QuickTestTrace.Log("undo", "mask quad drawnRect w=" + (dd.z - dd.x).ToString("F1")
+                + " h=" + (dd.w - dd.y).ToString("F1")
+                + " x=" + dd.x.ToString("F1") + ".." + dd.z.ToString("F1")
+                + " y=" + dd.y.ToString("F1") + ".." + dd.w.ToString("F1")
+                + " tex=" + (tex.mainTexture == null ? "NULL" : tex.mainTexture.width + "x" + tex.mainTexture.height)
+                + (dd.z - dd.x <= 0f || dd.w - dd.y <= 0f
+                   ? "  ⛔退化：绘制矩形宽或高为 0 ⇒ 这块不会被画出任何像素"
+                     + "（奇数尺寸贴图会被 UITexture.drawingDimensions 补 1 像素边距）"
+                   : "  ok"));
         }
         catch (Exception e)
         {
@@ -958,8 +1360,11 @@ public static class DuelUndo
     /// 工程里运行时新建标签都这么做（Menu.UpdateNewBadge、SuperPreList.CreateLabel 都是
     /// 从现成节点 GetComponentInChildren&lt;UILabel&gt; 抄字体），这里沿用同一口径：
     /// 不新增美术资源、不改任何 prefab。
+    ///
+    /// internal：灰键悬停提示（gameInfo 里那枚跟随鼠标的小标签）也走这份模板 ——
+    /// NGUI 没有全局默认字体，运行时新建 UILabel 必须抄一份真字体引用，否则不出字。
     /// </summary>
-    private static UILabel FindLabelTemplate()
+    internal static UILabel FindLabelTemplate()
     {
         try
         {
@@ -1023,43 +1428,8 @@ public static class DuelUndo
         QuickTestTrace.Log("undo", "mask hidden");
     }
 
-    /// <summary>运行时画一张「加载圈」：圆环 + 沿圆周的头亮尾淡，转起来就像在加载。</summary>
-    private static Texture2D SpinnerTexture()
-    {
-        if (spinnerTex != null)
-        {
-            return spinnerTex;
-        }
-        const int n = 128;
-        spinnerTex = new Texture2D(n, n, TextureFormat.RGBA32, false);
-        spinnerTex.wrapMode = TextureWrapMode.Clamp;
-        float half = (n - 1) * 0.5f;
-        float outer = half - 1f;
-        float inner = outer * 0.74f;
-        for (int y = 0; y < n; y++)
-        {
-            for (int x = 0; x < n; x++)
-            {
-                float dx = x - half;
-                float dy = y - half;
-                float d = Mathf.Sqrt(dx * dx + dy * dy);
-                float a = 0f;
-                if (d <= outer && d >= inner)
-                {
-                    // 绕一圈由淡到亮：起点最淡，接近起点处最亮，看起来像有头有尾
-                    float t = (Mathf.Atan2(dy, dx) + Mathf.PI) / (2f * Mathf.PI);
-                    a = Mathf.Clamp01(0.12f + 0.88f * t);
-                    // 内外边缘各软一格，别出锯齿
-                    a *= Mathf.Clamp01((outer - d) / 1.5f) * Mathf.Clamp01((d - inner) / 1.5f);
-                }
-                spinnerTex.SetPixel(x, y, new Color(1f, 1f, 1f, a));
-            }
-        }
-        spinnerTex.Apply();
-        return spinnerTex;
-    }
-
-    private static void Say(string text)
+    /// <summary>撤回/预览共用的屏内提示（预览类的前置校验提示与此处同文案，见 DuelUndoPreview.Enter）。</summary>
+    internal static void Say(string text)
     {
         try
         {
@@ -1071,20 +1441,5 @@ public static class DuelUndo
         catch (Exception)
         {
         }
-    }
-}
-
-/// <summary>
-/// 让撤回遮罩上的加载圈自转。
-///
-/// 单独一个组件（而不是塞进 DuelUndo 的每帧逻辑）是因为遮罩是**运行时现造**的 UI 对象，
-/// 它的生命周期只到本次撤回结束；转圈也跟着它一起活，被 Destroy 就自然停了。
-/// 用 Time.deltaTime 而不是 unscaleTime：这里要的就是「跟着游戏一起转」。
-/// </summary>
-public class UndoSpinner : MonoBehaviour
-{
-    void Update()
-    {
-        transform.Rotate(0f, 0f, -360f * Time.deltaTime);
     }
 }

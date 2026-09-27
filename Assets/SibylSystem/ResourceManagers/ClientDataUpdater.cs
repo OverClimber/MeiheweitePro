@@ -2,10 +2,13 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using Ionic.Zip;
+using Mono.Data.Sqlite;
 using UnityEngine;
 
 /// <summary>
-/// 在线数据更新：卡片库（cards.cdb）/ 禁限表（lflist.conf）/ 卡牌文本（strings.conf）三件套。
+/// 在线数据更新：卡片库（cards.cdb）/ 禁限表（lflist.conf）/ 卡牌文本（strings.conf）三件套
+/// + OCG 卡图补缺（pics/&lt;卡码&gt;.jpg，2026-09-26 起）。
 ///
 /// 思路与 KoishiPro2(iOS) 的 UpdateClientCoroutine 一致，落地路径按本工程口径：
 ///   · UnityFileDownloader.DownloadFileWithHeadCheck 负责：HEAD 取 ETag → 与本地 "&lt;文件&gt;.etag"
@@ -73,6 +76,18 @@ public static class ClientDataUpdater
     static bool _recoveryFailed;
     static bool _running;
     static bool _reloadPending;
+
+    // ── 单行汇总（2026-09-26 用户口径：一次「检查并更新」跑完只在聊天栏留一行，
+    //    不再让「检测到…开始下载 / 补图完成 / 另有…」三四条进度语刷屏）。
+    //    自动跑且什么都没变时完全静默（启动不该刷屏）。
+    static readonly List<string> SummaryDataNames = new List<string>();
+    static int SummaryPicsTotal;      // 真有图的张数（cdb 卡码里被覆盖集命中的个数 + 本次补到张数）
+    static int SummaryPicsAdded;      // 真补到的张数
+    static int SummaryPicsAbsent;     // CDN 确认暂无图、记入负缓存的张数
+    static bool SummaryPicsRan;       // 卡图阶段真的扫过一遍
+    static bool SummaryPicsNoCdb;     // 读不到卡片库 → 卡图阶段整体跳过
+    static bool SummaryPicsFailed;    // 一张都没成 = 判定网络不通
+    static bool SummaryDataFailed;    // 数据三件套阶段失败（状态已被 PicsPhase 冲掉，这里记着）
 
     static string Root
     {
@@ -380,9 +395,9 @@ public static class ClientDataUpdater
     /// <summary>
     /// 启动即调用；也可由「资源下载」菜单手动触发（同一时刻只会有一份在跑）。
     ///
-    /// force = true 时跳过本地 ETag 比对、无条件重下。必要性在于：ETag 记录的是「上次下到的版本」，
-    /// 它看不出本地文件内容有没有被换掉（例如被外部工具覆盖成旧版），所以「检查更新」修不了坏数据。
-    /// userInitiated = true 时无论结果都给出明确反馈 —— 手动点的，不能静默结束。
+    /// 两阶段：数据三件套（<see cref="DataPhase"/>）→ OCG 卡图补缺（<see cref="PicsPhase"/>，
+    /// 2026-09-26 用户口径：资源下载要把卡图更新也管起来，否则新卡（如盈彩月夜）只有数据没有图）。
+    /// 卡图阶段失败不判整体失败 —— 图是加法资产，缺了下次启动再补。
     /// </summary>
     public static IEnumerator UpdateCoroutine(bool force = false, bool userInitiated = false)
     {
@@ -395,6 +410,34 @@ public static class ClientDataUpdater
             yield break;
         }
         _running = true;
+        try
+        {
+            ResetSummary();
+            yield return Program.I().StartCoroutine(DataPhase(force, userInitiated));
+            // 数据阶段失败也照样查卡图：两者是各自独立的缺件（cdb 坏了不代表图也坏），
+            // 而且抓不到卡表时用户最想要的恰恰是先把图补上。
+            // 唯一副作用：PicsPhase 收尾会把 State 打成 Ready，会冲掉右上角
+            //「数据更新失败：…」的提示 ⇒ 跑完把失败状态还原回去。
+            bool dataFailed = State == UpdateState.Failed;
+            string dataError = LastError;
+            yield return Program.I().StartCoroutine(PicsPhase(force, userInitiated));
+            if (dataFailed)
+            {
+                State = UpdateState.Failed;
+                CurrentFile = dataError;
+            }
+            SummaryDataFailed = dataFailed;
+            PrintSummary(userInitiated);
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+
+    /// <summary>数据三件套阶段（原 UpdateCoroutine 主体；运行闸在包装器上）。</summary>
+    static IEnumerator DataPhase(bool force, bool userInitiated)
+    {
         Target[] targets = CreateTargets();
         bool completed = false;
         try
@@ -410,13 +453,6 @@ public static class ClientDataUpdater
             }
 
             SetState(UpdateState.Checking, "", 0f);
-
-            if (userInitiated)
-            {
-                PrintToChat(force
-                    ? "开始强制重新下载卡牌数据（卡片库 / 禁限表 / 卡牌文本）..."
-                    : "开始检查卡牌数据更新（卡片库 / 禁限表 / 卡牌文本）...");
-            }
 
             for (int i = 0; i < targets.Length; i++)
             {
@@ -449,8 +485,8 @@ public static class ClientDataUpdater
                             BeginTransaction(targets);
                             target.updated = true;
                             AnyFileUpdated = true;
+                            SummaryDataNames.Add(target.name);
                             SetState(UpdateState.Downloading, target.name, (float)index / targets.Length);
-                            PrintToChat("检测到【" + target.name + "】有更新，开始下载...");
                         },
                         target.validate,
                         delegate (string reason) { target.failure = reason; },
@@ -502,10 +538,6 @@ public static class ClientDataUpdater
                 State = UpdateState.Ready;
                 CurrentFile = "";
                 Progress = 1f;
-                if (userInitiated)
-                {
-                    PrintToChat("卡牌数据已是最新，无需更新。");
-                }
                 completed = true;
                 yield break;
             }
@@ -521,7 +553,6 @@ public static class ClientDataUpdater
         }
         finally
         {
-            _running = false;
             if (!completed)
             {
                 bool rolledBack = RollbackTransaction();
@@ -532,6 +563,337 @@ public static class ClientDataUpdater
                     ? "数据更新异常中断，现有数据未改动，请重试。"
                     : "数据更新异常中断，且旧数据恢复失败，请重启游戏后重试。");
             }
+        }
+    }
+
+    // ── 卡图阶段 ────────────────────────────────────────────────────────────
+
+    /// <summary>负缓存文件：CDN 上确认没有图的卡码（一行一个）。放 picture/card/ 里，
+    /// GameTextureManager 只按精确路径取图，不会列举目录，点开头文件对它不可见。</summary>
+    const string AbsentPicsFile = "picture/card/.picsync-absent.txt";
+
+    /// <summary>负缓存有效期（天）：CDN 后来补上的新图不能被一次「暂无」永久遮蔽。
+    /// 超期即视为空集重探，重探后 SaveAbsentPics 会刷新文件 mtime。</summary>
+    const int AbsentCacheTtlDays = 30;
+
+    /// <summary>卡图连续失败到此数且一张未成功 ⇒ 判定网络不通，提前退出（不空打上千张 HEAD）。</summary>
+    const int PicsNetworkGiveUpStreak = 5;
+
+    /// <summary>测试开关文件名：存在（且 qt_debug.on 开）时其内容替换卡图下载根 ——
+    /// 本地无外网环境用本地 HTTP 服务器验证整条卡图链路。正式环境永远读不到它。</summary>
+    const string PicsTestRootSwitch = "qt_picsroot.txt";
+
+    /// <summary>测试根是否激活（qt_debug.on 开 + qt_picsroot.txt 有内容）。</summary>
+    static bool PicsTestMode()
+    {
+        if (!QuickTestTrace.Enabled)
+        {
+            return false;
+        }
+        try
+        {
+            string p = QuickTestTrace.LogPath(PicsTestRootSwitch);
+            return File.Exists(p) && File.ReadAllText(p).Trim().Length > 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>卡图下载根（正式 = ContentRoot；测试 = qt_picsroot.txt 内容）。</summary>
+    static string PicsRoot()
+    {
+        if (!QuickTestTrace.Enabled)
+        {
+            return ContentRoot;
+        }
+        try
+        {
+            string p = QuickTestTrace.LogPath(PicsTestRootSwitch);
+            if (File.Exists(p))
+            {
+                string t = File.ReadAllText(p).Trim();
+                if (t.Length > 0)
+                {
+                    return t;
+                }
+            }
+        }
+        catch (Exception)
+        {
+        }
+        return ContentRoot;
+    }
+
+    /// <summary>
+    /// OCG 卡图补缺（KoishiPro2 同款源：ContentRoot + pics/&lt;卡码&gt;.jpg，2026-09-26 实测
+    /// 盈彩月夜 9362643 在此可达）。流程：
+    ///   ① 卡码集合 = 盘上 cdb/cards.cdb 的 datas 表（直接读文件 —— 不依赖内存重载时序，
+    ///     本轮刚更新的新卡也在内）；
+    ///   ② 覆盖集 = picture/card/ + picture/cardIn8thEdition/ + zip 内 pics/（GameTextureManager
+    ///     的查找顺序，见 GameTextureManager.getPicture）；
+    ///   ③ 缺的逐张 DownloadFileWithHeadCheck（HEAD+ETag 判重，落 picture/card/&lt;码&gt;.jpg）；
+    ///   ④ CDN 上确认没有的记负缓存，之后启动不再探测；卡片库刚更新过 / 强制更新时清缓存重探
+    ///     （CDN 可能补了新图）。
+    /// 单张失败不判整体失败（图是加法资产）。全失败视为网络问题、不写负缓存。
+    /// </summary>
+    static IEnumerator PicsPhase(bool force, bool userInitiated)
+    {
+        string root = PicsRoot();
+        string cdbPath = LocalPath("cdb/cards.cdb");
+        List<string> ids = QueryCardIds(cdbPath);
+        if (ids == null || ids.Count == 0)
+        {
+            QuickTestTrace.Log("pics", "query FAILED path=" + cdbPath + "（读不到卡码，跳过）");
+            SummaryPicsNoCdb = true;
+            yield break;
+        }
+
+        HashSet<string> covered = CollectCoveredPicIds();
+        HashSet<string> absent = (AnyFileUpdated || force) ? new HashSet<string>() : LoadAbsentPics();
+        List<string> missing = new List<string>();
+        for (int i = 0; i < ids.Count; i++)
+        {
+            if (!covered.Contains(ids[i]) && !absent.Contains(ids[i]))
+            {
+                missing.Add(ids[i]);
+            }
+        }
+        // 「真有图的张数」= cdb 卡码里被覆盖集命中的个数（用户口径 2026-09-26）。
+        // ⛔ 不能用 ids.Count（卡码总数）：负缓存里的卡**本地其实没图**，拿总数去报
+        //    「N 张卡都有图」会把数字报大（实测差几张，用户在对局外的汇总行里能看出来）。
+        int haveCount = 0;
+        for (int i = 0; i < ids.Count; i++)
+        {
+            if (covered.Contains(ids[i]))
+            {
+                haveCount++;
+            }
+        }
+        QuickTestTrace.Log("pics", "scan ids=" + ids.Count + " covered=" + covered.Count
+            + " have=" + haveCount + " absentCache=" + absent.Count + " missing=" + missing.Count
+            + " root=" + root + " anyDataUpdated=" + AnyFileUpdated + " force=" + force);
+
+        if (missing.Count == 0)
+        {
+            SetState(UpdateState.Ready, "", 1f);
+            SummaryPicsRan = true;
+            SummaryPicsTotal = haveCount;
+            yield break;
+        }
+
+        int okCount = 0;
+        int consecutiveFail = 0;
+        List<string> newlyAbsent = new List<string>();
+        for (int i = 0; i < missing.Count; i++)
+        {
+            string code = missing[i];
+            SetState(UpdateState.Downloading, "卡图", (float)i / missing.Count);
+            bool success = false;
+            yield return Program.I().StartCoroutine(UnityFileDownloader.DownloadFileWithHeadCheck(
+                root + "pics/" + code + ".jpg",
+                LocalPath("picture/card/" + code + ".jpg"),
+                delegate (bool s) { success = s; },
+                null,
+                null,
+                null,
+                null,
+                forceDownload: true));
+            if (success)
+            {
+                okCount++;
+                consecutiveFail = 0;
+            }
+            else
+            {
+                newlyAbsent.Add(code);
+                consecutiveFail++;
+                // 一张都没成、还连着失败 N 张 = 判定网络不通。继续对着上千张卡空打 HEAD
+                // 只会白等（新装机 + 外网挂的典型场景），提前收工、且不写负缓存。
+                if (okCount == 0 && consecutiveFail >= PicsNetworkGiveUpStreak)
+                {
+                    QuickTestTrace.Log("pics", "giveup streak=" + consecutiveFail
+                        + " ok=0（判定网络不通，提前退出，不写负缓存）");
+                    break;
+                }
+            }
+        }
+
+        SetState(UpdateState.Ready, "", 1f);
+        SummaryPicsRan = true;
+        SummaryPicsTotal = haveCount + okCount;   // 扫完 + 补完之后的「真有图张数」
+        SummaryPicsAdded = okCount;
+        SummaryPicsAbsent = newlyAbsent.Count;
+        SummaryPicsFailed = (okCount == 0 && newlyAbsent.Count > 0);
+        QuickTestTrace.Log("pics", "done ok=" + okCount + " absentNew=" + newlyAbsent.Count
+            + (newlyAbsent.Count > 0 ? " absentCodes=" + string.Join(",", newlyAbsent.GetRange(0, Math.Min(5, newlyAbsent.Count)).ToArray())
+                + (newlyAbsent.Count > 5 ? "…" : "") : ""));
+        // 全失败 = 大概率网络不通，负缓存会把「其实有图只是没网」的卡错记成没有 ⇒ 不写。
+        if (newlyAbsent.Count > 0 && okCount > 0)
+        {
+            SaveAbsentPics(newlyAbsent);
+        }
+    }
+
+    /// <summary>读盘上 cdb 的全部卡码（datas.id，字符串化）。失败返回 null。</summary>
+    static List<string> QueryCardIds(string cdbPath)
+    {
+        if (!File.Exists(cdbPath))
+        {
+            return null;
+        }
+        List<string> ids = new List<string>();
+        try
+        {
+            using (SqliteConnection con = new SqliteConnection("Data Source=" + cdbPath))
+            {
+                con.Open();
+                using (SqliteCommand cmd = con.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT id FROM datas";
+                    using (SqliteDataReader reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            ids.Add(Convert.ToInt64(reader.GetValue(0)).ToString());
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+            return null;
+        }
+        return ids;
+    }
+
+    /// <summary>
+    /// 已有卡图的覆盖集：picture/card/ 与 picture/cardIn8thEdition/ 的数字名文件
+    /// + 各 zip 内 pics/&lt;码&gt;.(jpg|png)（与 GameTextureManager.getPicture 的查找顺序对齐，
+    /// zip 里有的不算缺）。
+    /// </summary>
+    static HashSet<string> CollectCoveredPicIds()
+    {
+        HashSet<string> set = new HashSet<string>();
+        CollectDir(LocalPath("picture/card"), set);
+        CollectDir(LocalPath("picture/cardIn8thEdition"), set);
+        try
+        {
+            foreach (ZipFile zip in GameZipManager.Zips)
+            {
+                if (zip == null)
+                {
+                    continue;
+                }
+                foreach (string entry in zip.EntryFileNames)
+                {
+                    if (entry == null)
+                    {
+                        continue;
+                    }
+                    string lower = entry.ToLowerInvariant();
+                    if (!lower.StartsWith("pics/"))
+                    {
+                        continue;
+                    }
+                    string stem = Path.GetFileNameWithoutExtension(lower);
+                    string ext = Path.GetExtension(lower);
+                    long v;
+                    if ((ext == ".jpg" || ext == ".png") && long.TryParse(stem, out v))
+                    {
+                        set.Add(stem);
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+        return set;
+    }
+
+    static void CollectDir(string dir, HashSet<string> set)
+    {
+        try
+        {
+            if (!Directory.Exists(dir))
+            {
+                return;
+            }
+            foreach (string f in Directory.GetFiles(dir))
+            {
+                string stem = Path.GetFileNameWithoutExtension(f);
+                long v;
+                if (stem.Length > 0 && long.TryParse(stem, out v))
+                {
+                    set.Add(stem);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+    }
+
+    static HashSet<string> LoadAbsentPics()
+    {
+        HashSet<string> set = new HashSet<string>();
+        try
+        {
+            string path = LocalPath(AbsentPicsFile);
+            if (File.Exists(path))
+            {
+                // TTL：超期就把「暂无图」的结论作废、整份重探（CDN 可能已经补上了图）。
+                if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalDays > AbsentCacheTtlDays)
+                {
+                    QuickTestTrace.Log("pics", "absentCache expired（超 " + AbsentCacheTtlDays + " 天，忽略重探）");
+                    return set;
+                }
+                string[] lines = File.ReadAllLines(path);
+                for (int i = 0; i < lines.Length; i++)
+                {
+                    string s = lines[i].Trim();
+                    if (s.Length > 0)
+                    {
+                        set.Add(s);
+                    }
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+        return set;
+    }
+
+    static void SaveAbsentPics(List<string> newlyAbsent)
+    {
+        try
+        {
+            HashSet<string> merged = LoadAbsentPics();
+            for (int i = 0; i < newlyAbsent.Count; i++)
+            {
+                merged.Add(newlyAbsent[i]);
+            }
+            List<string> all = new List<string>(merged);
+            all.Sort();
+            string path = LocalPath(AbsentPicsFile);
+            string dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
+            File.WriteAllLines(path, all.ToArray());
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
         }
     }
 
@@ -590,6 +952,75 @@ public static class ClientDataUpdater
     public static bool ReloadPending
     {
         get { return (_reloadPending || _transactionActive) && !_running; }
+    }
+
+    static void ResetSummary()
+    {
+        SummaryDataNames.Clear();
+        SummaryPicsTotal = 0;
+        SummaryPicsAdded = 0;
+        SummaryPicsAbsent = 0;
+        SummaryPicsRan = false;
+        SummaryPicsNoCdb = false;
+        SummaryPicsFailed = false;
+        SummaryDataFailed = false;
+    }
+
+    /// <summary>
+    /// 一轮「检查并更新」跑完的单行汇总（2026-09-26 用户口径：一次跑完只留一行）。
+    /// 自动跑且一切照旧 → 完全静默（启动不该刷屏）；手动跑至少给一行回执
+    ///（否则点了菜单像没反应 —— 这正是「看不到卡图更新」的一半原因）。
+    /// </summary>
+    static void PrintSummary(bool userInitiated)
+    {
+        bool dataChanged = SummaryDataNames.Count > 0;
+        bool anything = SummaryDataFailed || dataChanged || SummaryPicsAdded > 0
+            || SummaryPicsFailed || SummaryPicsNoCdb;
+        if (!anything && !userInitiated)
+        {
+            return;
+        }
+
+        List<string> parts = new List<string>();
+        if (SummaryDataFailed)
+        {
+            parts.Add("数据更新失败（" + LastError + "）");
+        }
+        else if (dataChanged)
+        {
+            parts.Add("数据已更新[" + string.Join("、", SummaryDataNames.ToArray()) + "]");
+        }
+        else
+        {
+            parts.Add("数据已是最新");
+        }
+
+        if (SummaryPicsNoCdb)
+        {
+            parts.Add("卡图检查跳过（读不到卡片库）");
+        }
+        else if (SummaryPicsFailed)
+        {
+            parts.Add("卡图更新失败（网络问题？，下次启动重试）");
+        }
+        else if (SummaryPicsRan)
+        {
+            if (SummaryPicsAdded > 0)
+            {
+                string s = "卡图补 " + SummaryPicsAdded + " 张";
+                if (SummaryPicsAbsent > 0)
+                {
+                    s += "，另有 " + SummaryPicsAbsent + " 张 CDN 暂无图已跳过";
+                }
+                parts.Add(s);
+            }
+            else
+            {
+                parts.Add("卡图已是最新（" + SummaryPicsTotal + " 张卡都有图）");
+            }
+        }
+
+        PrintToChat("资源更新：" + string.Join("，", parts.ToArray()) + "。");
     }
 
     static void PrintToChat(string text)

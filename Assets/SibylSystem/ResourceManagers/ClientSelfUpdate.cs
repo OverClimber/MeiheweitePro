@@ -24,8 +24,11 @@ using UnityEngine;
 /// </summary>
 public static class ClientSelfUpdate
 {
-    /// <summary>本产品**独立**的单调版本号（与上游协议版本 Config.ClientVersion 解耦，别混）。</summary>
-    public const string ClientVersionText = "1.3";
+    /// <summary>本产品**独立**的单调版本号（与上游协议版本 Config.ClientVersion 解耦，别混）。
+    /// ⛔ 发布铁律：本常量一改，`version.txt` 就**必须在同一批发布里**跟着改 ——
+    ///    判据是「不等即有更新」(`HasUpdate = !VersionsEqual`)，若只改这里，
+    ///    1.4 用户会被提示「发现新版本 v1.3」。见 `_报告_…v1.4…` 的发布顺序。</summary>
+    public const string ClientVersionText = "1.4";
 
     /// <summary>版本文件在各源里的相对路径（仓库根 main 分支）。内容：纯文本，首行 = 版本串。</summary>
     const string VersionFileRel = "version.txt";

@@ -2274,7 +2274,7 @@ public class Menu : WindowServantSP
         {
             RMSshow_onlyYes(
                 "HANDLE_ONGOING_DOWNLOAD",
-                "卡牌数据正在后台更新中...",
+                "卡牌数据/卡图正在后台更新中...",
                 new messageSystemValue { value = "continue", hint = "知道了" }
             );
             return;
@@ -2283,9 +2283,10 @@ public class Menu : WindowServantSP
         {
             new messageSystemValue { value = "closeup", hint = "下载/更新立绘" },
             // 按 ETag 判增量，顺带会用真解析器校验本地文件 —— 本地数据被改坏会在此自动重下。
-            new messageSystemValue { value = "clientData", hint = "检查并更新卡牌数据" },
+            // 卡图（pics）也在同一次里补：卡码取自 cards.cdb，缺的逐张落到 picture/card/<卡码>.jpg。
+            new messageSystemValue { value = "clientData", hint = "检查并更新卡牌数据+卡图" },
             // 忽略本地记录、无条件重下：用于「文件本身合法但不是想要的那份」这类检查发现不了的情况。
-            new messageSystemValue { value = "clientDataForce", hint = "强制重下卡牌数据（修复）" },
+            new messageSystemValue { value = "clientDataForce", hint = "强制重下卡牌数据+卡图（修复）" },
             // 客户端本体版本检查（2026-09-25 新增，v1.3）：只查版本 + 指路夸克网盘，不自动下载。
             new messageSystemValue { value = "clientSelf", hint = "检查客户端更新" },
             new messageSystemValue { value = "cancel", hint = "取消" }
