@@ -578,6 +578,31 @@ public static class DuelUndo
             QuickTestTrace.Log("undo", "close socket: " + e.Message);
         }
 
+        // ①.5 丢掉**被拆掉那一局的录像包**。
+        //
+        // ⛔ 不清的后果（用户 2026-09-27 报的 bug「录像里把撤回前的操作也录进去了」）：
+        //    `TcpHelper.packagesInRecord` 是「一整局只进不出」的列表，而 SaveRecord
+        //    **不是追加写、也不是从某个起点写** —— 它把列表从第 0 条整段写盘，只把
+        //    sibyl_name 插在**最后一个** Start 后面。于是旧线（被撤掉的那半局）与
+        //    重开后的新一局会被拼进同一个 .yrp3d：文件里有 2 个 GameMessage.Start，
+        //    播放时先演一遍「撤回前那一局」，玩家看到的就是撤销掉的操作也被录了下来。
+        //    物证：`rd/replay/09-27「15：46：49」.yrp3d` = 618 包 / Start=2
+        //    （第 2 个 Start 在第 508 包，前 508 包全是被撤掉那一局的）。
+        //
+        // ⛔ 为什么不能指望旧连接的断线处理去清：<see cref="selfDisconnect"/> 那条分支
+        //    是**故意静默跳过**整段收尾的（见它的注释：不弹提示、不清录像缓冲、不收尾），
+        //    里面那几个 `packagesInRecord.Clear()` 一个都到不了 —— 2026-09-20 加那个
+        //    静默跳过时，「录像缓冲靠断线路径清」这条依赖没跟着改，于是从这里漏了出去。
+        //
+        // 位置放在「旧连接已断」之后：此刻起旧线不会再产出新包。万一旧 socket 缓冲区里
+        // 还躺着几条，addPackage 的 DropStalePreStart 会在新一局 Start 到达之前把它们
+        // 挡在录制之外（awaitingRestartStart 已在 BeginSession / ConfirmFromPreview 置位）。
+        // 新一局的包不受影响 —— launch() 在下面才调，它还一条都没来。
+        int droppedPacks = TcpHelper.packagesInRecord.Count;
+        TcpHelper.ClearRecordBuffer();
+        QuickTestTrace.Log("undo", "record buffer cleared: dropped=" + droppedPacks
+            + " packs（被撤掉那一局的录像包不再进新录像）");
+
         // ② 杀掉旧服务器与旧机器人（killServerProcess 内部会 DuelTimeline.End()）
         Program.I().aiRoom.killServerProcess();
 
