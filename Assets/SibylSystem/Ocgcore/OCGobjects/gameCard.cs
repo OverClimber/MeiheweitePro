@@ -134,6 +134,14 @@ public class gameCard : OCGobject
         gameObject_back = gameObject.transform.Find("card").Find("back").gameObject;
         gameObject_event_main = gameObject.transform.Find("card").Find("event").gameObject;
         cardHint = gameObject.transform.Find("text").GetComponent<TMPro.TextMeshPro>();
+        // 俯视角攻防数字发灰的第二根因（第一根因 uv2.y 见 notes/topdown.md §17.10）：
+        // TMPro_SDF.shader 顶点段 L169 把「世界空间法线」和「物体空间视线方向」做 dot
+        // （老 TMP 的跨空间 bug），cardHint 在俯视角被转平（euler 90°）后这个 dot 恰好
+        // 把 scale 乘上 _PerspectiveFilter=0.875 的缩减端 ⇒ AA 宽度暴增 ⇒ 2~3px 笔画
+        // 全变成过渡带、无纯色芯（实测填充 ≤230，60° 下是 254）。置 0 后 lerp 两端
+        // 相等，该错误项彻底失效，任何视角 scale 都是全值。等级珠（verticle_number）
+        // 不随俯视角转平所以从未受害。只动 arialuni 这份共享材质，幂等。
+        cardHint.fontSharedMaterial.SetFloat("_PerspectiveFilter", 0f);
         SpSummonFlash = insFlash("0099ff");
         ActiveFlash = insFlash("00ff66");
         SelectFlash = insFlash("ff8000");
@@ -949,7 +957,15 @@ public class gameCard : OCGobject
             return;
         }
         Vector3 screenposition = Program.camera_game_main.WorldToScreenPoint(accurate_position);
-        Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - 10));
+        // 🔒 2026-09-30：俯视下把「凑近」从 10 世界降到 **4**。
+        //   用户报：「怪兽上场以后攻击守备等字很模糊」。
+        //   机制：此处是把**整张卡**（含它下面那行 TMP 字）朝相机挪 10 世界，
+        //   正俯视机高≈31.7 ⇒ 放大 **1.46×**。卡面是贴图放大看不出来，
+        //   但 **TMP 字被放大到字图集分辨率之外 ⇒ 模糊**。
+        //   降到 4 世界 ⇒ 放大 1.145×：悬停反馈还在，字不再糊。
+        //   ⛔ 关态逐字段不变：位移量只在 `topDownLike` 分支改。
+        float near10 = Program.topDownLike ? 4f : 10f;
+        Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - near10));
         gameObject.transform.position += (worldposition - gameObject.transform.position) * 35f * Program.deltaTime;
         if (game_object_verticle_drawing != null)
         {
@@ -1392,6 +1408,231 @@ public class gameCard : OCGobject
                          );
             }
 
+        }
+    }
+
+    /// <summary>
+    /// 切视角后把这张卡的**附属物**朝向重设一次（v3 修的 B2，由
+    /// <c>Ocgcore.refreshViewOrientationIfNeeded</c> 在视角戳变化时整场调一遍）。
+    ///
+    /// <para><b>只管附属物，不管本体</b>：卡本体的朝向来自
+    /// <c>Ocgcore.get_world_rotation(card)</c>，x 恒 0 = 平铺，**与视角无关**。</para>
+    ///
+    /// <para><b>为什么这里必须显式写而不是靠每帧跟随</b>：这些对象
+    /// （提示字 / 立绘 / 刻度 / 星 / 攻防数字）各自只在**创建那一刻**设一次朝向，
+    /// 而承载它们的 <c>UA_flush_all_gived_witn_lock</c> 有 <c>Distance &gt; 0.001</c> 闸
+    /// ⇒ 场上不动的卡**永不重算**。每帧无条件写也不行：
+    /// <c>obj_number</c> 与立绘的亮相走 <c>iTween.RotateTo(..., 0.3f)</c> /
+    /// <c>iTween.ScaleTo</c>，每帧写会把亮相动画**按死在第一帧**（同类坑见
+    /// <c>UA_give_scale</c> 的头注）。⇒ 只能「戳变了就重设一次」。</para>
+    ///
+    /// <para>⛔ **不新增任何实例字段**（MEMORY 红线 13）：戳放在
+    /// <c>Ocgcore</c> 的一个 <c>static</c> 字段上，static 不参与 Unity 序列化。</para>
+    /// </summary>
+    /// <summary>
+    /// 排查用：这张卡**有没有挂上附属物**（提示字 / 立绘 / 刻度 / 星 / 攻防数字 任一非空）。
+    ///
+    /// <para>用途是**反空转**：探针切完视角要拿附属物朝向的实测值来判「摆正了没」，
+    /// 可这几个对象**不是每张卡都有**（立绘要设置里开了才创建、攻防数字是瞬态的）⇒
+    /// 场上没有带附属物的卡时，判据会「全绿但一个值都没比到」。
+    /// 这个量就是给探针当那道闸的。</para>
+    /// </summary>
+    /// <summary>
+    /// 排查用 `[num]`：把这个 3D 数字对象的**字形事实**打一行。
+    ///
+    /// <para>为什么需要它（2026-09-30，用户第二次报「怪兽上场后攻击守备等字很模糊」）：
+    /// 这类数字的 prefab（`mod_ocgcore_bs_atk_decoration`）走 <c>loadResource</c>，
+    /// **源码里读不到**；而「到底糊是因为被缩得比图集原生尺寸小、还是因为 SDF 锐度太低」
+    /// 这两种病因的修法**完全相反**（放大回去 vs 提 <c>_GradientScale</c>），
+    /// 猜错就是白干一轮。⇒ 运行时从实例上把图集尺寸 / 原生点大小 / 屏上像素高读出来。</para>
+    ///
+    /// <para>只在 <c>QuickTestTrace.Enabled</c> 下生效，正式包零影响。</para>
+    /// </summary>
+    /// <summary>
+    /// 排查用：对 **`cardHint`**（= 那个「2000/1400」，`set_text` 的落点）打一行字形事实。
+    /// ⛔ 为什么单独一个入口：上一轮我先猜了 `show_number` 的编号和 `bs_atk_decoration`，
+    ///    **两个都打错了对象**（自动对局里那两条路根本没走到，`[num]` 0 行）。
+    ///    `cardHint` 是**每张卡都常驻**的 ⇒ 一定能采到。
+    /// </summary>
+    public void logCardHintFacts()
+    {
+        logNumFacts("cardHint", cardHint == null ? null : cardHint.gameObject);
+    }
+
+    public void logNumFacts(string what, GameObject o)
+    {
+        if (!QuickTestTrace.Enabled || o == null)
+        {
+            return;
+        }
+        TMPro.TextMeshPro tmp = o.GetComponent<TMPro.TextMeshPro>();
+        System.Text.StringBuilder sb = new System.Text.StringBuilder("[num] what=");
+        sb.Append(what).Append(" scale=").Append(o.transform.lossyScale.x.ToString("F3"));
+        if (tmp == null)
+        {
+            // 不是 TMP ⇒ 那是带贴图的数字精灵，量它的 mesh 包围盒就行
+            MeshFilter mf = o.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+            {
+                sb.Append(" (not-TMP) mesh=").Append(mf.sharedMesh.name);
+            }
+            QuickTestTrace.Log("num", sb.ToString());
+            return;
+        }
+        sb.Append(" text=").Append(tmp.text)
+          .Append(" fontSize=").Append(tmp.fontSize.ToString("F1"))
+          .Append(" autoSizing=").Append(tmp.enableAutoSizing)
+          .Append(" mat=").Append(tmp.fontSharedMaterial == null ? "null" : tmp.fontSharedMaterial.name);
+        if (tmp.fontSharedMaterial != null && tmp.fontSharedMaterial.HasFloat("_GradientScale"))
+        {
+            sb.Append(" gradScale=").Append(tmp.fontSharedMaterial.GetFloat("_GradientScale").ToString("F1"));
+        }
+        if (tmp.fontSharedMaterial != null)
+        {
+            // 各向异性过滤：这是「缩小变糊」的第二个候选病因（图集没开 mipmap 时救不了，但能排掉）
+            sb.Append(" aniso=").Append(tmp.fontSharedMaterial.GetTexture("_MainTex") == null
+                        ? -1 : tmp.fontSharedMaterial.GetTexture("_MainTex").anisoLevel);
+        }
+        if (tmp.font != null)
+        {
+            // ⛔ 这版老 TMP 的 API 形状（三个坑，一个往次被新版本文档带跑）：
+            //    没有 aceInfo（是 ontInfo）、没有 tlasWidth/atlasHeight（图集就是 tlas 那个 Texture2D）。
+            if (tmp.font.atlas != null)
+            {
+                sb.Append(" atlas=").Append(tmp.font.atlas.width).Append("x").Append(tmp.font.atlas.height)
+                  .Append(" aniso=").Append(tmp.font.atlas.anisoLevel)
+                  .Append(" mips=").Append(tmp.font.atlas.mipmapCount);
+            }
+            if (tmp.font.fontInfo != null)
+            {
+                sb.Append(" pointSize=").Append(tmp.font.fontInfo.PointSize.ToString("F1"));
+            }
+        }
+        // 屏上像素高：把 TMP 的 mesh 顶点投到屏幕
+        // ⛔ TMP_MeshInfo 是**结构体**（没有 != null、也没有 ounds）——
+        //    这两个坑都是这版老 TMP 的 API 形状，别照新版本文档写。
+        if (Program.camera_game_main != null && tmp.textInfo != null)
+        {
+            // ⛔ 	extInfo 在这版是**按值返回的结构体** → 必须先落到局部变量，
+            //    否则对临时对象做 meshInfo[0] 索引编译不过。
+            // ⛔ 这版的 TMP_TextInfo.meshInfo 是**单个** TMP_MeshInfo（不是数组，
+            //    多 mesh 支持是后来的版本才有）→ 不能再下标。
+            TMPro.TMP_MeshInfo mi = tmp.textInfo.meshInfo;
+            if (mi.vertices != null && mi.vertices.Length >= 3)
+            {
+                Vector3 a = Program.camera_game_main.WorldToScreenPoint(mi.vertices[0]);
+                Vector3 b = Program.camera_game_main.WorldToScreenPoint(mi.vertices[3 % mi.vertices.Length]);
+                sb.Append(" screenH=").Append(Mathf.Abs(a.y - b.y).ToString("F1")).Append("px");
+            }
+        }
+        QuickTestTrace.Log("num", sb.ToString());
+    }
+
+    public bool hasViewAux()
+    {
+        return cardHint != null || verticle_number != null
+            || game_object_verticle_Star != null || game_object_verticle_drawing != null
+            || obj_number != null;
+    }
+
+    /// <summary>
+    /// 排查用：这张卡**有没有立起来**的附属物（刻度 / 星 / 攻防数字）。
+    ///
+    /// <para>与 <see cref="hasViewAux"/> 分开：要判「切换视角后朝向有没有被重设过」，
+    /// 只能拿**立起来**的附属物去量 —— 平铺的那个本来就是平的，量它没有区分度。</para>
+    /// </summary>
+    public bool hasVertAux()
+    {
+        return verticle_number != null || game_object_verticle_Star != null
+            || obj_number != null;
+    }
+
+    /// <summary>附属物朝着的 x 欧拉角；对象不存在就 <c>n/a</c>（探针据此判「实测采到了没」）。</summary>
+    static string auxEulerX(GameObject g)
+    {
+        if (g == null)
+        {
+            return "n/a";
+        }
+        Transform t = g.transform;
+        return t.localEulerAngles.x.ToString("F1");
+    }
+
+    /// <summary>附属物朝着的 x 欧拉角（TMP 版）；对象不存在就 <c>n/a</c>。</summary>
+    static string auxEulerX(TMPro.TextMeshPro t)
+    {
+        return t == null ? "n/a" : auxEulerX(t.gameObject);
+    }
+
+    /// <summary>
+    /// 排查用：把这张卡的**附属物实测朝向**吐成一行
+    /// （探针 `[tdmid]/[tdback] … aux[… (c0s0 loc=4 hint=… draw=… num=… vnum=… star=…)]`）。
+    ///
+    /// <para>⛔ 只**新增方法**、不新增任何实例字段（MEMORY 红线 13），也不改既有字段的可见性 ——
+    /// 私有字段在这段代码里读得到（和 <c>refreshViewOrientation</c> 同一个类）。
+    /// 这几个量都**实测**（<c>localEulerAngles</c>），不是「按公式算的应有角度」——
+    /// 判「切完视角附属物有没有真的摆正」只能咬实测值。</para>
+    /// </summary>
+    public void appendViewAuxDump(System.Text.StringBuilder sb)
+    {
+        sb.Append(" (c").Append(p.controller).Append("s").Append(p.sequence)
+          .Append(" loc=").Append((int)p.location)
+          .Append(" hint=").Append(auxEulerX(cardHint))
+          .Append(" draw=").Append(auxEulerX(game_object_verticle_drawing))
+          .Append(" num=").Append(auxEulerX(obj_number))
+          .Append(" vnum=").Append(auxEulerX(verticle_number))
+          .Append(" star=").Append(auxEulerX(game_object_verticle_Star))
+          .Append(")");
+    }
+
+    /// <summary>
+    /// 排查用：打**一整行** `[auxo] stamp=… view=… fx=… c=… s=… loc=… hint=… draw=… num=… vnum=… star=…`。
+    ///
+    /// <para>与 <see cref="appendViewAuxDump"/> 分开：那个往别人的 <c>StringBuilder</c> 里**追加一段**，
+    /// 这个**自己打一行**（探针是按行收的）。字段名/顺序与探针的 <c>auxo_of()</c> 一一对应，
+    /// 改任何一边都必须同时改另一边 —— 两边分处两个文件、没有编译期约束。</para>
+    /// </summary>
+    public void logViewAuxRow(int stamp, int view, float fx)
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder("[auxo] stamp=");
+        sb.Append(stamp).Append(" view=").Append(view)
+          .Append(" fx=").Append(fx.ToString("F1"))
+          .Append(" c=").Append(p.controller).Append(" s=").Append(p.sequence)
+          .Append(" loc=").Append((int)p.location)
+          .Append(" hint=").Append(auxEulerX(cardHint))
+          .Append(" draw=").Append(auxEulerX(game_object_verticle_drawing))
+          .Append(" num=").Append(auxEulerX(obj_number))
+          .Append(" vnum=").Append(auxEulerX(verticle_number))
+          .Append(" star=").Append(auxEulerX(game_object_verticle_Star));
+        QuickTestTrace.Log("auxo", sb.ToString());
+    }
+
+    public void refreshViewOrientation()
+    {
+        if (cardHint != null)
+        {
+            // 四分支本体，**别自己写角度**（我方怪兽 frontX／对方怪兽 frontX−20／
+            // 非怪兽区硬编码 90）—— 重抄一遍必然和原实现漂。
+            UA_reloadCardHintPosition();
+        }
+        float fx = Program.tableauFrontX;
+        if (verticle_number != null)
+        {
+            verticle_number.gameObject.transform.localEulerAngles = new Vector3(fx, 0, 0);
+        }
+        if (game_object_verticle_Star != null)
+        {
+            game_object_verticle_Star.transform.localEulerAngles = new Vector3(fx, 0, 0);
+        }
+        if (game_object_verticle_drawing != null)
+        {
+            game_object_verticle_drawing.transform.localEulerAngles = new Vector3(fx, 0, 0);
+        }
+        if (obj_number != null)
+        {
+            // 亮相动画还在跑就别打断它（iTween 会每帧写）—— 动画自己会转到当时的 frontX。
+            // 动画跑完之后的那一帧，靠牌桌重摆（realize）把它摆正。
+            obj_number.transform.localEulerAngles = new Vector3(fx, 0, 0);
         }
     }
 
@@ -2364,6 +2605,10 @@ public class gameCard : OCGobject
 
     public void show_number(int number,bool add=false)  
     {
+        if (obj_number != null)
+        {
+            logNumFacts("show_number/" + number, obj_number);
+        }
         if (add)
         {
             show_number(number_showing * 10 + number);

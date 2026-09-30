@@ -294,6 +294,10 @@ public class gameInfo : MonoBehaviour
         }
         // 末尾：灰键悬停提示（没有灰键时只是一次列表扫描，见 updateGrayTip）
         updateGrayTip();
+        // 「俯视角/正常视角」切换钮（方案C 56×56）：落位右缘钉在本面板右缘、中心高 80px。
+        // 放这里是因为本类每帧都在跑，而且 `instance_btnPan` 的最终 scale 此刻才定 ——
+        // 早一拍读会拿到未缩放的值，落位就偏。
+        ViewToggleButton.Tick(instance_btnPan);
     }
 
     List<gameUIbutton> HashedButtons = new List<gameUIbutton>();

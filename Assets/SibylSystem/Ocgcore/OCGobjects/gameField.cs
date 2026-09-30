@@ -147,6 +147,74 @@ public class GameField : OCGobject
     public const string NewFieldPathRD = "texture/duel/newfield_rd.png";
 
     /// <summary>
+    /// 俯视角专用的**不透明**场地图（v3 / 需求④）。
+    ///
+    /// <para><b>为什么必须有</b>：原生 <c>newfield.png</c> 是**画在透明底上的线稿** ——
+    /// 实测 alpha 分布 52.2% 全透明 + 42.3% 半透明，可见像素里暗色块只有 119/24716。
+    /// 底下的 <c>texture/common/desk.jpg</c>（7680×4320 角色插画）会**直接穿透盘面**。
+    /// 60° 下透视＋高光把格内冲淡成乳白，问题不显；正俯视正对盘面 ⇒ 看到的是原始 alpha
+    /// ⇒ 插画糊在格线上，整块盘面读起来「小而远」—— 需求④的主因。</para>
+    ///
+    /// <para><b>怎么做的（关键：继承原图，不从零重画）</b>：不透明底盘 ＋ 每格一块**内缩**的
+    /// 浅色面板（面板内缩 ⇒ 面板与格线之间露出一圈底色 ⇒ 相邻格之间有「缝」，
+    /// <b>不移动任何一条格线</b> ⇒ 点击热区与视觉零错位）＋ 我方/对方半区不同深浅
+    /// ＋ 把原图**完全不透明的像素原样合成回来** ⇒ 35 / 14(0) / 星 / 圆 / 叉 逐像素不变。
+    /// 生成器 <c>devtools/make_flat_field.py</c>（自带「不透明 ≥98%」与「标记保真 = 0 违例」两条自检）。</para>
+    ///
+    /// <para>⛔⛔ **2026-09-28 停用：用户报「俯视角的场地背景变成一团黑」。**
+    /// 实测这张图的 alpha 分布：**44% 的像素是 (16,16,32) 那档近黑** ——
+    /// 因为它把原图 52.2% 的**全透明**区域填成了 <c>MAT_BG = (26,28,34)</c>。
+    /// 而原生 <c>newfield.png</c> 本来就是**画在透明底上的线稿**（只有 5.6% 不透明），
+    /// 盘面在 60° 下的观感**来自底下的角色插画穿透**。⇒ 把它做成不透明 = 把插画换成黑底。
+    /// 用户口径（与「背景不该随视角变」同一条）：**俯视的场地观感必须和正常视角一样**。
+    /// ⇒ 已从 <see cref="NewFieldPath"/> 里摘掉；生成器 <c>devtools/make_flat_field.py</c> 保留
+    /// （若将来要重做，正确做法是**把原图合成到一张取自 60° 实测的浅色盘面底色**上，
+    /// 而不是填近黑）。</para>
+    /// </summary>
+    public const string NewFieldPathFlatOCG = "texture/duel/newfield_flat.png";
+
+    /// ⛔⛔ **已停用**（2026-09-28）：它返回的那张图把原图的透明区填成了近黑，
+    /// 使场地变成「一团黑」（实测 44% 像素是 (16,16,32)）。保留定义只为了记录这条经历，
+    /// 不再有任何调用点（<code>NewFieldPath</code> 已不再参与选择）。
+    public static string FlatFieldPath
+    {
+        get
+        {
+            if (File.Exists(NewFieldPathFlatOCG))
+            {
+                return NewFieldPathFlatOCG;
+            }
+            QuickTestTrace.Log("field", "俯视角场地图缺 " + NewFieldPathFlatOCG + " → 回落 " + NewFieldPathOCG);
+            return NewFieldPathOCG;
+        }
+    }
+
+    /// <summary>
+    /// 本局该用哪张新场地贴图。**只看模式，不看视角**（v3 返工，2026-09-28）。
+    ///
+    /// <para>⛔⛔ 上一版是「四选一」（模式 × 视角），俯视走 <see cref="NewFieldPathFlatOCG"/>，
+    /// 用户连着报两次「背景不对」：第一次是**屏底背景**被换成近黑的 <c>desk_flat.jpg</c>
+    /// （已改回只看模式），第二次是**场地底**被换成近黑的 <c>newfield_flat.png</c>（本条）。
+    /// 两条是同一个病根：**把「让画面不糊」当成了「可以换素材」**。
+    /// 用户口径是「**不切模式，背景就不该变**」⇒ 场地图也回到只看模式。</para>
+    ///
+    /// <para>⚠ 这是**加载期**一次性决定的量：对局途中切视角**不换场地图**（有意的取舍 ——
+    /// 换图要重铺所有格位贴图，风险大于收益）。下一局自动生效。
+    /// ⇒ 好处是：俯视与 60° 用**同一张**贴图 ⇒ 「两者没有任何互相影响」在素材层面也成立。</para>
+    /// </summary>
+    public static string NewFieldPath
+    {
+        get
+        {
+            if (GameModeManager.IsRD)
+            {
+                return RdFieldPath;
+            }
+            return NewFieldPathOCG;
+        }
+    }
+
+    /// <summary>
     /// RD 本局该用哪张 —— 就是 <see cref="NewFieldPathRD"/>；它缺了才回落 OCG 那张
     /// （宁可多显示用不到的格子，也不能整块场地白板）。
     /// </summary>
@@ -164,17 +232,10 @@ public class GameField : OCGobject
     }
 
     /// <summary>
-    /// 本局该用哪张新场地贴图。RD 走 <see cref="RdFieldPath"/>，
-    /// OCG 就是原生那张。
-    /// </summary>
-    public static string NewFieldPath
-    {
-        get { return GameModeManager.IsRD ? RdFieldPath : NewFieldPathOCG; }
-    }
-
-    /// <summary>
     /// MR3 那条线该用哪张。**RD 与 OCG 用的图不一样**：OCG 是原生的 field.png，
     /// RD 换成上面那张紧凑盘面（RD 的格位坐标与 OCG 不同，必须配同一张图）。
+    /// ⛔ 俯视角**不换 MR3 那张**：俯视角固定用 newfield 系（那张本来就是纯俯视网格），
+    /// 换过去反而会与 `field.png` 的构图不一致。
     /// </summary>
     public static string OldFieldPath
     {
@@ -531,10 +592,104 @@ public class GameField : OCGobject
         return false;
     }
 
+    /// <summary>
+    /// 渲染场地贴图的那台相机（探针用）。场地贴图是 **2D UI 层**上的 NGUI widget，
+    /// 所以要用它所在 <c>UIPanel</c> 的 <c>anchorCamera</c>；拿不到才回落到传入的那台。
+    /// </summary>
+    public Camera MatCamera(Camera fallback)
+    {
+        UITexture[] ts = new UITexture[] { leftT, midT, rightT };
+        for (int i = 0; i < ts.Length; i++)
+        {
+            if (ts[i] == null)
+            {
+                continue;
+            }
+            UIPanel p = ts[i].GetComponent<UIPanel>();
+            if (p == null)
+            {
+                Transform t = ts[i].transform.parent;
+                while (t != null)
+                {
+                    p = t.GetComponent<UIPanel>();
+                    if (p != null)
+                    {
+                        break;
+                    }
+                    t = t.parent;
+                }
+            }
+            if (p != null && p.anchorCamera != null)
+            {
+                return p.anchorCamera;
+            }
+        }
+        return fallback;
+    }
+
+    /// <summary>
+    /// **场地贴图**那一块面的屏幕包围盒（2026-09-28 新增，探针用）。
+    ///
+    /// <para>为什么非要它：用户报「俯视角的场地比正常视角偏左」，而这个偏置量**推不出来** ——
+    /// 它同时受 <c>getScreenCenter()</c>（2D 面板宽度）、<c>fieldSize</c>、以及贴图本身
+    /// 实际外框三者影响。本轮已经**推错两次**（先归咎 <c>PanX</c>、再归咎视口居中），
+    /// 第三次干脆直接把贴图四角投到屏幕上量。</para>
+    ///
+    /// <para>ⓘ 取的是 <c>leftT/midT/rightT</c> 三个 NGUI <c>UITexture</c> 的**并集**。
+    /// ⛔⛔ 它们**不是 3D 面**：场地贴图是画在 **2D UI 层**上的（`installFieldTextures` 给它们
+    /// 挂 `mainTexture` + 摆 `localPosition`），所以 <c>localToWorldMatrix</c> + 3D 相机投影
+    /// 会把四角投成**同一个点**（2026-09-28 实测：w=h=0，中心正好落在世界原点 (960,492)）。
+    /// ⇒ 必须走 NGUI 自己的 <c>UIRect.worldCorners</c>，并用**渲染它的那台相机**投影
+    /// （与 `[ocrui]` 探针取 <c>panel.anchorCamera</c> 同一套口径）。</para>
+    ///
+    /// <para>返回的是**屏幕左下原点**口径的 <see cref="Rect"/>（y 已按 <paramref name="screenH"/>
+    /// 翻转），与 <c>[view] proj</c> 的 <c>z-&gt;screenY</c> 同一套换算，脚本可以直接和它对账。</para>
+    /// </summary>
+    public Rect MatScreenRect(Camera cam, float screenH)
+    {
+        if (cam == null)
+        {
+            return new Rect(0f, 0f, 0f, 0f);
+        }
+        UITexture[] ts = new UITexture[] { leftT, midT, rightT };
+        float x0 = float.MaxValue;
+        float x1 = float.MinValue;
+        float y0 = float.MaxValue;
+        float y1 = float.MinValue;
+        bool any = false;
+        for (int t = 0; t < ts.Length; t++)
+        {
+            if (ts[t] == null)
+            {
+                continue;
+            }
+            // ⛔ NGUI widget 在**屏幕 XY 平面**（z=0），不是 XZ。本版 NGUI 的 UIRect 不是
+            //   Transform 子类（编译器拒绝 s 转换），也拿不到 widget 自己的
+            //   worldCorners ⇒ 用 localToWorldMatrix 直接变本地单位方块的四个角。
+            //   ⛔ 中心那口写成 XZ 是一个**真错**：四角会折成一条线，
+            //   实测就是 w=h=0、中心恰好落在世界原点 (960,492)。
+            Matrix4x4 m = ts[t].transform.localToWorldMatrix;
+            for (int i = 0; i < 4; i++)
+            {
+                Vector3 p = m.MultiplyPoint3x4(new Vector3(
+                    (i == 1 || i == 2) ? 0.5f : -0.5f,
+                    (i >= 2) ? 0.5f : -0.5f,
+                    0f));
+                Vector3 sp = cam.WorldToScreenPoint(p);
+                if (sp.x < x0) x0 = sp.x;
+                if (sp.x > x1) x1 = sp.x;
+                float y = screenH - sp.y;                 // 翻成左下原点，和 proj 标尺同口径
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+                any = true;
+            }
+        }
+        return any ? Rect.MinMaxRect(x0, y0, x1, y1) : new Rect(0f, 0f, 0f, 0f);
+    }
+
     public void loadNewField()
     {
-        string path = NewFieldPath;
-        QuickTestTrace.Log("field", "loadNew MasterRule=" + Program.I().ocgcore.MasterRule
+        string path = NewFieldPath;        QuickTestTrace.Log("field", "loadNew MasterRule=" + Program.I().ocgcore.MasterRule
             + " mode=" + GameModeManager.ModeLabel + " path=" + path);
         installFieldTextures(path);
         applyPhaseBarLayout("loadNew");
@@ -902,7 +1057,35 @@ public class GameField : OCGobject
         relocateTextMesh(LOCATION_REMOVED_1, 1, CardLocation.Removed, new Vector3(0, 0, -3f));
         relocateTextMesh(LOCATION_GRAVE_1, 1, CardLocation.Grave, new Vector3(0, 0, -3f));
 
-        label.transform.localPosition = new Vector3(-5f * (Program.fieldSize - 1), 0, -15.5f * Program.fieldSize);
+        label.transform.localPosition = Program.topDownLike
+            // 🔑 v3 / 需求③（O2）：俯视角下这行提示字**下移到屏底留白带**，否则压在我方手牌上。
+            //   2026-09-28 `[ocrui]` 实测：它落在 R=779,843,1264,867，而手牌排 y∈[817,939]
+            //   ⇒ y 方向重叠 24px。移到手牌外沿之下、屏幕下沿之上那条带里
+            //   （`HandOuterAbs + 1.0` ⇒ 屏上 y≈962，手牌底 939、屏底 986，两头都留到了）。
+            //   顺带把 x 推到中线右侧，避开左栏面板（实测右缘 x=780）。
+            //   ⛔ 关态**一个数都不动**（还是原来那句 `fieldSize` 口径）—— 60° 实测这行落在
+            //   手牌与盘面之间的空档里，本来就不遮挡。
+            // 🔑 v3 返工（2026-09-29 用户：「T1 我方的主要阶段1 等文字应该在我方卡牌的
+            //   **上方**而不是下方，调换下顺序，因为这样更贴合正常视角」）。
+            //   60° 里这行字就在手牌**正上方**（实测 y≈762 vs 卡 780~905）⇒ 俯视也放上方。
+            //   落点 = **场地贴图下沿与手牌内沿之间那条缝的正中**
+            //   （`MatHalfZ + HandGap/2` = 17.6+0.7 = 18.3 世界，实测那条缝 25px，
+            //     而这行字高 24px ⇒ 正好落在缝里，不压场地也不压卡）。
+            //   x 归 0 = **与手牌排同一条中线**（60° 也是居中在手上方）。
+            ? new Vector3(0f, 0f, -(TableauLayout.MatHalfZ + TableauLayout.HandGap * 0.5f))
+            : new Vector3(-5f * (Program.fieldSize - 1), 0, -15.5f * Program.fieldSize);
+        // 🔑 2026-09-29：这行字的**屏上字号保持固定**。
+        //   用户原话：「为什么 t1 我方主要阶段这些字字体变得这么小？」
+        //   真正的原因：它是**3D 物体**（不是 2D UI），它的屏上大小 ∝ `px/世界`。
+        //   我连着调 `CoverZ`（手牌行基准抬到贴图 17.6、`HandGap` 1.4→2.2）时
+        //   `px/世界` 从 20.25 降到 17.20 ⇒ 字号同比缩小 **15%**。
+        //   ⇒ 按 `CoverZ` 补偿缩放，让它回到旧的**像素大小**。
+        //   ⚠ 只在俯视分支上做；关态一个数都不动（那个 prefab 的缩放是 awake 写一次的）。
+        if (Program.topDownLike)
+        {
+            float k = TableauLayout.CoverZ / TableauLayout.HandScale / 13.0f;   // ← HandScale=1.79 时约为 1.0
+            label.transform.localScale = new Vector3(0.03f * k, 0.03f * k, 0.03f * k);
+        }
         // ⛔ 介绍文字（「我方的 主要阶段1」这行）的旋转同样每帧跟 `tableauFrontX`：
         //    NGUI label 的 mod_simple_ngui_text prefab 根也带 60° 烘焙，切俯视角不重建
         //    ⇒ 只在 awake 写一次会停在 60°（同 relocateTextMesh，用户 2026-09-23 第 6 轮）。
@@ -1183,7 +1366,15 @@ public class GameField : OCGobject
     {
         currentString = "T" + Program.I().ocgcore.turns.ToString() + " " + hint;
     }
-    GameObject big_string;
+    public GameObject big_string;
+
+    /// <summary>阶段大字（`MAIN PHASE 1` 那类）的当前对象，供 <c>Ocgcore.occProbeTick</c> 量它的屏占。
+    /// ⛔ 只把既有字段的可见性放开，**不新增任何实例字段**（MEMORY 红线 13：
+    /// 发布 DLL 的字段布局必须与已烘焙资源逐字段对齐）。</summary>
+    public GameObject occBigString
+    {
+        get { return big_string; }
+    }
 
     public void animation_show_big_string(Texture2D tex,bool only=false)    
     {
@@ -1196,6 +1387,32 @@ public class GameField : OCGobject
             destroy(big_string);
         }
         big_string = create(Program.I().New_phase,Program.I().ocgcore.centre(),Vector3.zero,false,Program.ui_main_2d,true,new Vector3(Screen.height / 1000f* Program.fieldSize, Screen.height / 1000f * Program.fieldSize, Screen.height / 1000f * Program.fieldSize));
+        // ⛔⛔ 2026-09-30 **删掉俯视缩小**（原 `* TableauLayout.PhaseTextScaleFlat` = 0.40）。
+        //
+        // 用户口径：「阶段大字太小了。要求其在俯视角下也要有正常视角一样大的占比」。
+        //
+        // <para>为什么当初要缩：v3 需求③O1 把这张字挪去了「右侧空列」，而俯视下那条空列
+        // 只有 ~280px 宽 ⇒ 原尺寸塞不进去 ⇒ 乘 0.40。**两条是一个决定的两半**。</para>
+        //
+        // <para>现在那条空列方案已被推翻（用户判「放在场地外不对，应当如正常体现」，
+        // 落点改回 `ocgcore.centre()`），⇒ 缩放的理由**不存在了**，必须一起删。
+        // 只删落点不删缩放，就会留下这个「为挪位而设的尺寸」——那正是本轮要修的东西。</para>
+        //
+        // <para>实测（`[view] ptext box=`，2D UI 相机投影，1920×986）：
+        ///   60°  = **716×419**（占屏 **37.3% × 42.5%**）
+        ///   俯视旧 = 286×168（占屏 14.9% × 17.0%）
+        /// 比值 716/286 = 2.503、419/168 = 2.494 ≈ 1/0.40 ⇒ **同占比的系数就是 1.0**。
+        /// 删掉这段后 `localScale` 两档完全相同（都是上面那个
+        /// `Screen.height/1000 * fieldSize`），屏占应当逐像素对齐。</para>
+        //
+        // <para>判据：`_verify_topdown_rd.py` 的 **G10**（两档屏占宽高各差 ≤3%）。
+        /// 加这条判据时先在旧代码上跑过一遍，**确认它会红**（23/24）——
+        /// 本轮已吃过「判据从没判过却报全绿」的亏，不再凭「看着对」就信。</para>
+        //
+        // ⛔ 顺带说明：这里**不需要**任何补偿系数。这张字挂在 `ui_main_2d` 下、
+        // 活在 **2D UI 相机**空间，而视角切换只动 `camera_game_main` /
+        // `camera_container_3d`（`Program.cs` 的 `tableauViewportFullScreen` + 机位），
+        // **不碰 2D 相机** ⇒ 同一个 `localScale` 在两档就是同一个屏占。
         big_string.GetComponentInChildren<UITexture>().mainTexture = tex;
         Program.I().ocgcore.Sleep(40);
         big_string.AddComponent<animation_screen_lock2>();

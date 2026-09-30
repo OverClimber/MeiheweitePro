@@ -82,6 +82,10 @@ public class Setting : WindowServant2D
         // ⛔ 顺序就是视觉顺序（AddExtraToggleRow 按 extraToggleRows 往下排 24px/行），
         //   换顺序会把那两行的 slot 从 2/3 变成 3/4（行下移一行，属预期）。
         CreateTopDownToggle();
+        // 「显示视角切换按钮」紧跟在「俯视角（平面图）」**下面**（用户 2026-09-30 定）。
+        // ⚠ 顺序就是视觉顺序：追加行按 extraToggleRows 往下排 24px/行，插在俯视角之后
+        //   会把它下面那几行（召唤/盖放询问、极大怪兽一体化）整体下移一行 —— 属预期。
+        CreateViewToggleButtonToggle();
         CreateAskMSetToggle();
         CreateAskSummonToggle();
         // 「极大怪兽一体化」放在**最后**：它是 RD 独占行，排末尾才不会改动上面几行的 slot
@@ -114,9 +118,23 @@ public class Setting : WindowServant2D
     /// 相机那一步由 `fixALLcamerasPreFrame` 的每帧补间带出动画。
     /// ⚠ 对局途中切换时，**场地的位置标签要下一局才换角度**（它们是 `GameField` 构造时建一次的，
     ///   `realize` 不会重建整个 GameField）；卡与名牌会立刻重摆。
+    ///
+    /// <para>⛔ <b>2026-09-30：这一行在设置页里不再显示</b>（用户要求「玩家不再能通过设置界面
+    /// 设置是否进入俯视角，而是得靠按钮」）。行**仍然照建**，只是登记进
+    /// <see cref="extraRowNeverShown"/> 被 <see cref="ExtraRowVisible"/> 判成不可见 ——
+    /// 理由与后果见那个字段的注释（一句话：不建会让 <c>save()</c> 少写一个键、
+    /// <c>SyncTopDownRow</c> 变成死代码）。</para>
+    ///
+    /// <para>视角本身的真源仍然是全局键 <c>topDown_</c>：战斗界面那颗眼形钮
+    /// （<see cref="ViewToggleButton.ApplyTopDown"/>）直接写它并落盘，
+    /// 所以「设置页看不见这一行」**不等于**「俯视角只能开机时那一面」——
+    /// 对局中随时能切。</para>
     /// </summary>
     private void CreateTopDownToggle()
     {
+        // ⛔ 顺序：先登记隐藏、再建行 —— 建行末尾会调 `SyncExtraRowVisibility`，
+        //   那时判据必须已经就位，否则这一行会先被排进 slot、留下一格错位。
+        extraRowNeverShown.Add("topDown_");
         AddExtraToggleRow("topDown_", "俯视角（平面图）", () => "topDown_", "0");
         UIHelper.registEvent(gameObject, "topDown_", onChangeTopDown);
     }
@@ -130,23 +148,98 @@ public class Setting : WindowServant2D
             return;
         }
         Program.topDown = t.value;
-        // 「拉镜头」的平移量属于**上一个视角的取景**：换视角一律回到**默认机位**（最底下，
-        // `topDownPanRestZ`）。不回去的话，关掉再打开会带着上次的平移量 ⇒ 看起来像「画面歪了」，
-        // 而玩家没滚过滚轮。（`preFrameFunction` 的每帧跟随下一帧也会兜到，这里同帧先落定。）
-        Program.topDownPanZ = Program.topDownPanRestZ;
+        // 「拉镜头」的三个状态属于**上一个视角的取景**：换视角一律 `ResetPan()`。
+        // 不复位的话，关掉再打开会带着上次的平移量 ⇒ 看起来像「画面歪了」，而玩家没滚过滚轮。
+        // （收摊那一处已由 `TableauLayout.NormalizePan` 每帧夹取覆盖，见 v3 注释。）
+        TableauLayout.ResetPan();
         // 重摆场景放在**落盘之前**（用户 2026-09-23 第 1 条：「切视角时手牌强制挪位置」）：
-        // `[tdmid]` 实测这条路是**同帧**生效的（手牌 z −21.15→−20.80、缩放 1.000→1.500 一次到位）。
+        // `[tdmid]` 实测这条路是**同帧**生效的（手牌一次到位）。
         // 放在 `save()` 前是为了「重摆」不依赖磁盘写成功 —— 写配置万一抛异常（磁盘满/文件被占），
         // 视角也该照样切、手牌也该照样摆。
         onCP();
+        // ⛔⛔ **切视角不许碰背景**（v3 返工，2026-09-28 用户报「俯视角下背景丢失了」）。
+        //   v3 上一版在这里调 `backGroundPic.ReapplyForView()` 去换「安静背景」——
+        //   那张图暗到 (17,19,24)，铺满屏看着就是背景没了；而且它**违反需求①**
+        //   （「普通视角和俯视角必须没有任何互相影响」）：背景是 OCG/RD 的属性。
+        //   ⇒ 背景只由 `GameModeManager.Changed` 驱动，视角这一路一行都不留。
+        //   （`desk_flat.jpg` 还在工程里，但**没有任何代码引用它** —— 别再顺手接上。）
         QuickTestTrace.Log("view", "topDown=" + (Program.topDown ? 1 : 0)
+            + " mode=" + Program.view
+            + " stamp=" + Program.viewStamp
             + " tilt=" + Program.tableauTilt.ToString("F0")
-            + " cover=" + Program.topDownCoverZ.ToString("F1")
+            + " cover=" + TableauLayout.CoverZ.ToString("F2")
+            + " handRow=" + TableauLayout.HandRowAbs.ToString("F2")
+            + " outer=" + TableauLayout.HandOuterAbs.ToString("F2")
+            + " margin=" + TableauLayout.ScreenMargin.ToString("F2")
             + " handScale=" + Program.tableauHandScale(1).ToString("F3"));
         // ⛔ 自己落盘：AddExtraToggleRow 里挂的那份 save 已被本行的 registEvent 顶掉
         //   （UIHelper.registEvent 对 UIToggle 走的是 onClick.Clear()+Add —— 是替换不是追加），
         //   不补这一步就只剩 saveWhenQuit 一条路 ⇒ 游戏被强杀/崩溃时这一项会丢。
         save();
+    }
+
+    /// <summary>
+    /// 「显示视角切换按钮」开关：**默认开**（缺省 <c>"1"</c>，见
+    /// <see cref="ViewToggleButton.SettingVisible"/>）。关掉之后战斗里那颗 56×56 眼形钮就不出现。
+    ///
+    /// <para>⚠ 2026-09-30：**「俯视角（平面图）」那一行已被隐藏**
+    /// （见 <see cref="extraRowNeverShown"/>），所以这一行现在是**玩家唯一的偏好入口**。
+    /// 后果要说清楚：<b>把这一项关掉之后，玩家就再也进不了俯视角了</b>
+    /// ——设置页看不见俯视角开关、战斗里又没有钮，两个出口同时没了。
+    /// 用户明确要求「默认开启」，此处照办；若要彻底堵死这个死角，
+    /// 把这一行也登记进 <c>extraRowNeverShown</c> 即可（钮恒在、偏好项不再暴露）。</para>
+    ///
+    /// 键是 <see cref="ViewToggleButton.SettingKey"/>（<c>viewToggleBtn_</c>），
+    /// 值走 <see cref="ViewToggleButton.SettingVisible"/>（static，不加实例字段）。
+    /// OCG / RD 共用同一行 —— 它是「界面偏好」，与卡池无关（与 <c>topDown_</c> 同理）。
+    /// </summary>
+    private void CreateViewToggleButtonToggle()
+    {
+        AddExtraToggleRow(ViewToggleButton.SettingKey, "显示视角切换按钮",
+            () => ViewToggleButton.SettingKey, "1");
+        UIHelper.registEvent(gameObject, ViewToggleButton.SettingKey, onChangeViewToggleButton);
+    }
+
+    /// <summary>「显示视角切换按钮」的改动回调：写全局 + 自己落盘。</summary>
+    private void onChangeViewToggleButton()
+    {
+        UIToggle t;
+        if (!extraRowToggles.TryGetValue(ViewToggleButton.SettingKey, out t) || t == null)
+        {
+            return;
+        }
+        ViewToggleButton.SettingVisible = t.value;
+        // ⛔ 自己落盘：AddExtraToggleRow 挂的那份 save 已被本行的 registEvent 顶掉
+        //   （UIHelper.registEvent 对 UIToggle 走的是 onClick.Clear()+Add —— 替换不是追加），
+        //   不补这一步就只剩 saveWhenQuit 一条路 ⇒ 被强杀/崩溃时这一项会丢（同 onChangeTopDown）。
+        save();
+        QuickTestTrace.Log("viewbtn", "setting visible=" + (t.value ? 1 : 0)
+            + " key=" + ViewToggleButton.SettingKey);
+    }
+
+    /// <summary>
+    /// 把「俯视角（平面图）」那一行的 toggle 刷成 <paramref name="value"/>。
+    ///
+    /// 给战斗界面那颗 56×56 视角钮用（<see cref="ViewToggleButton"/>）—— 它改的是**同一个**
+    /// 全局键 <c>topDown_</c>，所以两边必须始终同状态：设置页开着的窗口要立刻跟上，
+    /// 否则会出现「钮上是俯视、设置页里没勾」这种自相矛盾的画面。
+    ///
+    /// 只改控件的值、**不触发** <see cref="onChangeTopDown"/>：那边的副作用
+    /// （写 view / ResetPan / 重摆 / 落盘）已经由 <c>ViewToggleButton.ApplyTopDown</c> 做过了，
+    /// 再触发一遍就是重摆两次。
+    /// ⛔ 纯新增方法，不加任何字段（发布 DLL 的字段布局须与已烘焙资源逐字段对齐）。
+    /// </summary>
+    public void SyncTopDownRow(bool value)
+    {
+        UIToggle t;
+        if (!extraRowToggles.TryGetValue("topDown_", out t) || t == null)
+        {
+            return;         // 这一行还没建（设置窗口没开过）—— 存盘走 Config，真源不受影响
+        }
+        if (t.value != value)
+        {
+            t.value = value;
+        }
     }
 
     /// <summary>
@@ -339,9 +432,34 @@ public class Setting : WindowServant2D
     private Vector3 extraRowSrcLocalPos = Vector3.zero;
     private bool extraRowSrcPosSaved = false;
 
-    /// <summary>这一行此刻该不该显示（RD 独占行在 OCG 下不显示，其余恒显示）。</summary>
+    /// <summary>设置页里**永远不显示**的追加行（2026-09-30 用户要求：俯视角不再能从设置页切，
+    /// 只能靠战斗界面那颗眼形钮 —— 见 <see cref="ViewToggleButton"/>）。
+    ///
+    /// <para>⛔ <b>static，不加实例字段</b>：发布 DLL 的字段布局必须与已烘焙资源逐字段对齐
+    /// （MEMORY 红线）。与 <c>ViewToggleButton.SettingVisible</c> 同样的处理方式。</para>
+    ///
+    /// <para><b>为什么「建了行再藏」而不是干脆不建</b>：不建的话这一行就不进
+    /// <c>save()</c> 的落盘循环（它遍历 <c>extraToggleRowNames</c>），
+    /// 而 <c>topDown_</c> 的值有三处会读它（<c>AddExtraToggleRow</c> 建行时、
+    /// <c>SyncTopDownRow</c> 按钮改视角后回刷、<c>save()</c> 落盘）。
+    /// 建了藏起来 ⇒ toggle 仍持有当前值、<c>save()</c> 照常落盘、按钮回刷照常工作，
+    /// 只是**玩家看不见也点不到**。不建则这三处里有两处变成死代码。</para>
+    ///
+    /// <para>藏了之后 <see cref="ExtraRowVisible"/> 把它算作不可见 ⇒
+    /// <see cref="VisibleRowCount"/> 不计它、<c>SyncExtraRowVisibility</c> 会把后面的行
+    /// **往上提一格** ⇒ 窗口高度自动收回，<b>不会留 24px 空档</b>。</para>
+    /// </summary>
+    private static readonly System.Collections.Generic.HashSet<string> extraRowNeverShown
+        = new System.Collections.Generic.HashSet<string>();
+
+    /// <summary>这一行此刻该不该显示（RD 独占行在 OCG 下不显示；
+    /// <see cref="extraRowNeverShown"/> 里的**恒不显示**；其余显示）。</summary>
     private bool ExtraRowVisible(string rowName)
     {
+        if (extraRowNeverShown.Contains(rowName))
+        {
+            return false;
+        }
         if (extraRowRdOnly.Contains(rowName))
         {
             return GameModeManager.IsRD;
@@ -385,7 +503,6 @@ public class Setting : WindowServant2D
     /// </summary>
     private void SyncExtraRowVisibility()
     {
-        bool rd = GameModeManager.IsRD;
         int slot = 0;
         for (int i = 0; i < extraToggleRowNames.Count; i++)
         {
@@ -395,7 +512,10 @@ public class Setting : WindowServant2D
             {
                 continue;
             }
-            bool show = !extraRowRdOnly.Contains(name) || rd;
+            // ⚠ 显隐**只走 `ExtraRowVisible` 这一个出口**：原先这里是内联的
+            //   `!extraRowRdOnly.Contains(name) || rd`，与 `ExtraRowVisible` 重复了一份 ——
+            //   2026-09-30 加「永久隐藏」判据时就差点只改一处、结果行还照旧显示。
+            bool show = ExtraRowVisible(name);
             if (go.activeSelf != show)
             {
                 go.SetActive(show);
@@ -421,9 +541,40 @@ public class Setting : WindowServant2D
             // 改成正面判据；这里不制造歧义。
             QuickTestTrace.Log("setting", "rdRows visible=" + VisibleRowCount() + "/"
                 + extraToggleRowNames.Count + " mode=" + GameModeManager.ModeLabel
-                + " hidden=" + (extraToggleRowNames.Count - VisibleRowCount()));
+                + " hidden=" + (extraToggleRowNames.Count - VisibleRowCount())
+                // ⚠ 永久隐藏（俯视角那行）**与**按模式隐藏必须能分开：
+                //   `hidden=` 只是差值，看不出是哪一类藏的 ⇒ 验收脚本会把「按模式藏 3 行」
+                //   和「永久藏 1 行 + 按模式藏 2 行」当成同一件事。逐个点名。
+                + " neverShown=" + string.Join("|", extraRowNeverShown)
+                // ⚠⚖ 再加逐行 `act=`：**不能**拿「日志里有没有 `[setting] toggle <row>` 行」
+                //   来判断那一行可不可见 —— 那个日志在 `SyncExtraRowVisibility()` **之后**才打，
+                //   而失活对象的 `transform.position` 照样读得出来 ⇒ 藏起来的行**也会**被报出来。
+                //   （2026-09-30 写判据时在这上面栽过：把「隐藏」写成「日志里没有」，
+                //     那条判据恒红 —— 它证明的是错的东西。）
+                //   `act=` 直接报 `SetActive` 之后的真值，那才是玩家能不能看到/点到。
+                + " act=" + ExtraRowActiveList());
         }
         GrowWindowForExtraRows();
+    }
+
+    /// <summary>逐行报 `<行名>=<activeSelf 0/1>`（创建顺序）。
+    /// 供验收脚本判「这一行此刻到底显不显示」——只看行数或只看 `hidden=` 差值都不够。</summary>
+    private string ExtraRowActiveList()
+    {
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        for (int i = 0; i < extraToggleRowNames.Count; i++)
+        {
+            string name = extraToggleRowNames[i];
+            GameObject go;
+            bool act = extraRowObjects.TryGetValue(name, out go) && go != null
+                && go.activeSelf;
+            if (sb.Length > 0)
+            {
+                sb.Append('|');
+            }
+            sb.Append(name).Append('=').Append(act ? 1 : 0);
+        }
+        return sb.ToString();
     }
 
     /// <summary>

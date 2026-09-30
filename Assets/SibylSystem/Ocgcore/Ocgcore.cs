@@ -3834,74 +3834,20 @@ public class Ocgcore : ServantWithCardDescription
     }
 
 
-    // ── 俯视角「拉镜头」的每帧跟随状态（第 7 轮）────────────────────────────
-    // 上一拍的摊开态：摊开↔收摊切换时把 `Program.topDownPanUserTook` 复位，
-    // 让自动值重新接管（旧写法在闲态分支里每帧复位，第 7 轮起闲态允许用户上滑后停留，
-    // 复位时机收窄到「状态切换」这一拍）。
+    // ── 俯视角「拉镜头」的每帧跟随状态 ──────────────────────────────────────
+    // 上一拍的摊开态：摊开↔收摊切换时把 TableauLayout.PanUserTook 复位，让自动值重新接管。
+    //
+    // ⛔ v3 **删掉**了第 7/8 轮那一族「查看对方手牌」状态（topDownOpHandShownLast /
+    //   topDownOpHandHoverLatch / topDownOpHandReleaseLine / topDownOpHandHover，
+    //   连同 topDownPanMaxZ 共 6 个状态量）。它们是**取景 bug 的绷带**：对方手牌贴屏边甚至
+    //   被切出屏，所以要做「悬停对方手牌就自动把取景拉过去看」。v3 把边距修好之后
+    //   **对方手牌本来就完整在屏内，这个功能不需要了**。
+    //   留着它的代价是实测过的：6 个状态 + 一条释放线 + 一个锁存防震荡逻辑，
+    //   而且第 7 轮为此把「闲态每帧贴回」改成「只在状态切换时复位」——
+    //   「什么时候复位」这件事从一处变成三处，是 13 轮返工的来源之一。
+    //   （教训：**为修症状加的状态，修好症状后要连同它的复位点一起删**，否则它自己会变成新 bug。）
     bool topDownPanSpreadLast = false;
 
-    // 上一拍「查看对方手牌」态（第 8 轮起 = **悬停锁存**）。翻转时复位 UserTook
-    // 并落一条 `[ophand]` 探针日志（验收/排查用，变了才写）。
-    bool topDownOpHandShownLast = false;
-
-    // 「查看对方手牌」的**锁存**态：鼠标悬停对方手卡 ⇒ 置位；光标退到对方手牌行下方
-    // （释放线，见 `topDownOpHandReleaseLine`）才清零。悬停丢失本身**不**清零 —— 见方法注释。
-    bool topDownOpHandHoverLatch = false;
-
-    /// <summary>
-    /// 锁存释放线的 |z|：对方手牌行 0 的行心再往**牌桌内侧**退一个卡长。
-    /// 行心 = `(cover − 0.5) − 2s`（与 <see cref="Program.topDownPanMaxZ"/> 消费的同一行带模型），
-    /// 半长 = 2s；s = 1.5 时行心 20.8、半长 3 ⇒ 释放线 = 20.8 − 6 = **14.8**。
-    /// 光标的世界 z 低于它 = 用户明确把鼠标从对方手牌那侧收回来了 —— 这是锁存唯一的 OFF 条件。
-    /// </summary>
-    float topDownOpHandReleaseLine()
-    {
-        float s = Program.topDownHandMaxScale;
-        float row0 = (Program.topDownCoverZ - 0.5f) - 2f * s;
-        return row0 - 4f * s;
-    }
-
-    /// <summary>
-    /// 「查看对方手牌」态检测（第 8 轮口径：**鼠标悬停对方手卡**，整体替换第 7 轮的
-    /// 「对方手牌行有公开牌面（Id&gt;0）」—— 用户澄清「查看」指的是把鼠标滑上去，不是效果公开）。
-    ///
-    /// ⛔⛔ **必须锁存**，否则永动震荡：悬停 ⇒ 拉镜头到 maxZ ⇒ 对方手牌行在屏上滑走
-    ///    ⇒ 光标不再压着那张卡 ⇒ 悬停丢失 ⇒ 回 rest ⇒ 行又滑回光标底下 ⇒ 再悬停……
-    ///    所以 ON 之后只认「光标退到释放线以下」这一种 OFF；悬停丢失不清锁存。
-    /// 触发用 <see cref="gameCard.ES_pointed_raw"/>（纯射线几何）：对方手牌平时
-    /// still_unclickable，走 ES_mouse_check 会被一票否掉。
-    /// 光标的世界 z：正俯视相机沿 −Y 看 ⇒ ScreenToWorldPoint 给相机高度即得 y=0 桌面落点。
-    /// </summary>
-    bool topDownOpHandHover()
-    {
-        bool hover = false;
-        for (int i = 0; i < cards.Count; i++)
-        {
-            if (cards[i].gameObject.activeInHierarchy
-                && cards[i].p.controller == 1
-                && (cards[i].p.location & (UInt32)CardLocation.Hand) > 0
-                && cards[i].ES_pointed_raw())
-            {
-                hover = true;
-                break;
-            }
-        }
-        if (hover)
-        {
-            topDownOpHandHoverLatch = true;
-        }
-        else if (topDownOpHandHoverLatch)
-        {
-            float camH = Program.camera_game_main.transform.position.y;
-            Vector3 wp = Program.camera_game_main.ScreenToWorldPoint(new Vector3(
-                Input.mousePosition.x, Input.mousePosition.y, camH));
-            if (wp.z < topDownOpHandReleaseLine())
-            {
-                topDownOpHandHoverLatch = false;
-            }
-        }
-        return topDownOpHandHoverLatch;
-    }
 
     #region 排查用：对局途中切视角（qt_topdownmid.on）
     // 用户 2026-09-23 第 1 条：「对局途中切视角时，手牌要**立刻**重摆，
@@ -3921,6 +3867,9 @@ public class Ocgcore : ServantWithCardDescription
     /// <summary>排查用：一行装下「相机位置 + 手牌排每张卡的 transform / 已落定目标 / 缩放」。</summary>
     string tdMidDump()
     {
+        int nAux = 0;        // 活跃手牌卡数
+        int nWithAux = 0;    // 其中「至少挂了一个附属物」的卡数 —— 判「有物证」用
+        int nVert = 0;       // 其中「攻防数字/刻度/星 立着」的卡数 —— 判「朝向被重设过」用
         System.Text.StringBuilder sb = new System.Text.StringBuilder();
         if (Program.camera_game_main != null)
         {
@@ -3947,7 +3896,29 @@ public class Ocgcore : ServantWithCardDescription
               .Append(" acc=").Append(a.z.ToString("F2"))
               .Append(" sc=").Append(cards[i].gameObject.transform.localScale.x.ToString("F3"))
               .Append("]");
+            nAux++;
+            if (cards[i].hasViewAux())
+            {
+                nWithAux++;
+            }
+            if (cards[i].hasVertAux())
+            {
+                nVert++;
+            }
+            cards[i].appendViewAuxDump(sb);
         }
+        // 探针要判的三件事都在这一行里：视角号（判「真的翻了」）、带附属物的活跃卡数（判「有物证」）、
+        // 竖立朝向的卡数（判「切换后附属物真的被重设过」）。
+        // `view=` 给 0/1：探针的 `view_of()` 用 `view=(\d+)` 判「这次切到底翻没翻」，
+        // 名字另给 `viewName=`（人看）。上一轮我图省事只打了名字 ⇒ 那几条判据恒 None。
+        sb.Append(" view=").Append(Program.topDown ? 1 : 0)
+          .Append(" viewName=").Append(Program.view)
+          .Append(" fieldAux=").Append(nWithAux)
+          .Append(" vert=").Append(nVert)
+          .Append(" aux[front=").Append(Program.tableauFrontX.ToString("F0"))
+          .Append(" view=").Append(Program.topDown ? 1 : 0)
+          .Append(" stamp=").Append(Program.viewStamp)
+          .Append(" n=").Append(nAux).Append("]");
         return sb.ToString();
     }
 
@@ -3989,6 +3960,78 @@ public class Ocgcore : ServantWithCardDescription
         {
             tdMidLateAt = -1;
             QuickTestTrace.Log("tdmid", "late topDown=" + (Program.topDown ? 1 : 0) + tdMidDump());
+        }
+    }
+    // 排查用：收尾那次**反向**切（`qt_topdownback.on`），验「反过来也一样」。
+    // ⛔ 2026-09-30 补写。此前探针一直在等这个标签而游戏侧**没有实现**，
+    //    害得 S4 那 4 条判据变成**永远不可能红**的空判据（假绿）。
+    bool tdBackFlipDone = false;
+    int tdBackArmMs = -1;
+    int tdBackLateAt = -1;
+    int tdBackWaitMs = 0;
+
+    /// <summary>
+    /// 排查用：`qt_topdownback.on` 的每帧处理 —— **反向**再切一次视角。
+    ///
+    /// <para><b>为什么要等「场上真的有带附属物的怪」</b>：这次切的判据要看附属物朝向的**实测值**，
+    /// 而立绘要设置里开了才创建、攻防数字是瞬态对象 ⇒ 开局那几拍切过去，
+    /// 188 个比对值里非空 0 个（2026-09-27 实测），绿也等于没验。
+    /// ⇒ 先等到 <c>hasViewAux()</c> 的卡 ≥ 1，最多等 120s，超时也切（宁可少验不可不切）。</para>
+    /// </summary>
+    void topDownBackProbeTick()
+    {
+        if (!QuickTestTrace.SwitchOn("qt_topdownback.on"))
+        {
+            tdBackFlipDone = false;
+            tdBackArmMs = -1;
+            tdBackLateAt = -1;
+            tdBackWaitMs = 0;
+            return;
+        }
+        if (!tdBackFlipDone)
+        {
+            if (!isShowed || condition != Condition.duel)
+            {
+                return;
+            }
+            if (tdBackArmMs < 0)
+            {
+                tdBackArmMs = Program.TimePassed();
+                return;
+            }
+            int waited = Program.TimePassed() - tdBackArmMs;
+            if (waited < 4000)
+            {
+                return;
+            }
+            int withAux = 0;
+            for (int i = 0; i < cards.Count; i++)
+            {
+                if (cards[i] != null && cards[i].gameObject.activeInHierarchy
+                    && cards[i].hasViewAux())
+                {
+                    withAux++;
+                }
+            }
+            // 等到有物证就跑；等到 120s 上限就**带着现有物证**跑（判据自己会报采没采到）。
+            if (withAux <= 0 && waited < 120000)
+            {
+                tdBackWaitMs = waited;
+                return;
+            }
+            tdBackFlipDone = true;
+            QuickTestTrace.Log("tdback", "pre topDown=" + (Program.topDown ? 1 : 0)
+                + " waitMs=" + tdBackWaitMs + " withAux=" + withAux + tdMidDump());
+            Program.topDown = !Program.topDown;
+            realize(true);                 // = Setting.onChangeTopDown 里的 onCP()
+            QuickTestTrace.Log("tdback", "post topDown=" + (Program.topDown ? 1 : 0) + tdMidDump());
+            tdBackLateAt = Program.TimePassed();
+            return;
+        }
+        if (tdBackLateAt > 0 && Program.TimePassed() - tdBackLateAt >= 1500)
+        {
+            tdBackLateAt = -1;
+            QuickTestTrace.Log("tdback", "late topDown=" + (Program.topDown ? 1 : 0) + tdMidDump());
         }
     }
     #endregion
@@ -4152,73 +4195,54 @@ public class Ocgcore : ServantWithCardDescription
         if (QuickTestTrace.Enabled)
         {
             topDownMidProbeTick();
+            topDownBackProbeTick();
         }
 
-        Program.reMoveCam(getScreenCenter());
-        if (Program.topDown)
+        // 🔑 v3 返工（2026-09-28，用户报「俯视角下整个棋盘和手牌都过度偏向左侧」）：
+        //   俯视下**不要**用 `getScreenCenter()` 那个居中点。
+        //
+        //   ⓘ 那个点 = `(Screen.width + cardDescription.width − gameInfo.width)/2`，是**按左右两个
+        //   2D 面板的宽度**算出来的 —— 60° 斜视角下 3D 区域确实被两个面板夹着，偏一点才对；
+        //   正俯视下 3D 内容**横跨整屏**，再偏就成了「过度偏左」。本机 `gameInfo` 比
+        //   `cardDescription` 宽 80px ⇒ `getScreenCenter() ≈ 920`（中线 960）⇒ 视口整体左移 80px。
+        //
+        //   ⛔⛔ **为什么必须改这一行、而不是只在 `fixALLcamerasPreFrame` 里纠正视口**：
+        //   实测那样**无效** —— 本函数（`preFrameFunction`，由 ocgcore 每帧跑）在
+        //   `fixALLcamerasPreFrame` **之后**才写 `camera.rect`，把它又推回偏的。
+        //   判据直接量出来了：把 `PanX` 归 0 之后内容中点从 x=880 变成 x=1042，
+        //   差的 162px 正好 = PanX×20.246 ⇒ PanX 生效了，而**视口那 82px 一次都没被纠正**。
+        //   `TableauLayout.tableauViewportFullScreen()` 仍然留着当兜底（防别的写入点），
+        //   但**真正生效的是这一行**。
+        //
+        //   ⛔ 关态逐字节不变：仍然传 `getScreenCenter()`。
+        Program.reMoveCam(Program.topDownLike ? (float)Screen.width / 2f : getScreenCenter());
+        // 俯视角下同一根滚轮 = **拉镜头（纯平移）**：正俯视没有透视，沿桌面纵深挪相机
+        // 不会改变任何一张卡的大小（口径见 TableauLayout.PanZ）——
+        // 用户 2026-09-23 第 2 条要的就是「像斜位视角一样能拉镜头，而不是靠改变卡的大小」。
+        //
+        // v3 把它压到**三行**（旧口径是 40 行 + 6 个状态量）：
+        //  ① 摊开↔收摊的切换点把玩家控制权交回自动值（`PanUserTook` 复位）；
+        //  ② 每帧的「自动值跟随 + 量程夹取」放在 `TableauLayout.NormalizePan()`，
+        //     挂在 `Program.fixALLcamerasPreFrame` 的**每帧求机位那一处** ——
+        //     实机里有的摊开路径不走 toNearest、或调用时机早于 someCardIsShowed 翻转，
+        //     只弹一次会「弹了个空」，所以必须每帧贴；
+        //  ③ 滚轮量程 = ±PanLimit() = ±|PanAuto()|。**闲态 PanAuto 恒 0 ⇒ 平时滚轮一动不动**
+        //     （「默认没有什么往上滑动的机会」；旧口径那个 rest=−2.0 / maxZ=+2.0 的双档是
+        //      取景 bug 的补丁，边距修好后不再需要，见上面的注释）。
+        //
+        // ⚠ 滚轮本身仍受 `isShowed` 一道闸（排除菜单/卡组界面：DeckManager 自己也在用滚轮转相机、
+        //   卡描述滚页）；关态走下面那条原路（cameraPosition.z + 夹取），逐字节不变。
+        if (Program.topDownLike)
         {
-            // 俯视角下同一根滚轮 = **拉镜头（纯平移）**：正俯视没有透视，沿桌面纵深挪相机
-            // 不会改变任何一张卡的大小（口径与理由见 `Program.topDownPanZ`）——
-            // 用户 2026-09-23 第 2 条要的就是「像斜位视角一样能拉镜头，而不是靠改变卡的大小」。
-            //
-            // ⛔⛔ **每帧跟随**（第 5 轮起）：实机里有的摊开路径不走 toNearest、或调用时机早于
-            //   `someCardIsShowed` 翻转 / `topDownRowOuter` 重算 ⇒ 只弹一次会「弹了个空」。
-            //   所以自动值**每一帧**都贴；用户一滚轮（`Program.topDownPanUserTook`）就把控制权
-            //   交给玩家，直到**状态切换**（摊开↔收摊、对方手牌公开↔结束）才收回 ——
-            //   摊开/收摊/切视角/新对局的显式复位点不变（clearAllShowed / 11278 / Setting）。
-            //
-            // **自动值取哪个**（第 8 轮起三档）：
-            //   ① 摊开态（someCardIsShowed）⇒ `topDownPanNeed()`（最外行底缘 + 空位，「一口气弹到底」）；
-            //   ② 闲态 + **鼠标悬停对方手卡**（=「查看对方手牌」，第 8 轮口径：悬停锁存
-            //      `topDownOpHandHover` —— 悬停 ⇒ maxZ，光标退到对方手牌行下方才解除，
-            //      防止「镜头滑走 → 悬停丢失 → 镜头回来」的永动震荡）⇒ `topDownPanMaxZ`
-            //      （对手手牌上缘离屏幕边的空位 = 我方手牌默认的底缘空位，与 rest 对称）；
-            //   ③ 其余闲态 ⇒ `topDownPanRestZ`（默认机位，最底下）。
-            //   手动滚轮的量程 = [自动值, `topDownPanMaxZ`] —— 闲态也允许上滑一格看一眼对面
-            //   手牌行（第 7 轮：「允许上滑一点」），一格（5 世界）大于量程宽（4 世界）⇒
-            //   一滚就到 maxZ，恰好是「查看对方手牌时默认滑动到那个距离」的那个距离。
-            // ⚠ 滚轮本身仍受 `isShowed` 一道闸（排除菜单/卡组界面：`DeckManager` 自己也在用
-            //   滚轮转相机、卡描述滚页）；关态不受影响：走下面那条原路（`cameraPosition.z` + 夹取），
-            //   逐字节不变。
-            bool spreadNow = someCardIsShowed;
-            if (spreadNow != topDownPanSpreadLast)
+            if (someCardIsShowed != topDownPanSpreadLast)
             {
-                // 摊开↔收摊的切换点：上一段里用户滚出来的位置不再延续（收摊回 rest / 摊开弹到底），
-                // 自动值重新接管。收摊回 rest 由 clearAllShowed 的显式复位兜同帧，这里是兜底。
-                // 悬停锁存一并清零：摊开时卡面都在挪，旧锁存不再代表「用户正看着对面」。
-                topDownPanSpreadLast = spreadNow;
-                topDownOpHandHoverLatch = false;
-                topDownOpHandShownLast = false;
-                Program.topDownPanUserTook = false;
-            }
-            bool opShown = topDownOpHandHover();
-            if (opShown != topDownOpHandShownLast)
-            {
-                // 「查看对方手牌」开始/结束：同上，自动值重新接管（结束 = 回默认机位）。
-                topDownOpHandShownLast = opShown;
-                Program.topDownPanUserTook = false;
-                if (QuickTestTrace.Enabled)
-                {
-                    QuickTestTrace.Log("ophand", "shown=" + (opShown ? 1 : 0));
-                }
-            }
-            if (spreadNow)
-            {
-                if (!Program.topDownPanUserTook)
-                {
-                    Program.topDownPanZ = Program.topDownPanNeed();
-                }
-            }
-            else
-            {
-                if (!Program.topDownPanUserTook)
-                {
-                    Program.topDownPanZ = opShown ? Program.topDownPanMaxZ : Program.topDownPanRestZ;
-                }
+                // 摊开↔收摊的切换点：上一段里用户滚出来的位置不再延续，自动值重新接管。
+                topDownPanSpreadLast = someCardIsShowed;
+                TableauLayout.PanUserTook = false;
             }
             if (isShowed)
             {
-                Program.topDownPanBy(Program.wheelValue);
+                TableauLayout.PanBy(Program.wheelValue);
             }
         }
         else
@@ -7449,7 +7473,9 @@ public class Ocgcore : ServantWithCardDescription
                         card.set_code(code);
                         btn = new gameButton(((i << 16) + 1), InterString.Get("攻击宣言@ui"), superButtonType.attack);
                         card.add_one_button(btn);
-                        card.add_one_decoration(Program.I().mod_ocgcore_bs_atk_decoration, 5, Vector3.zero, "atk");
+                        card.logNumFacts("atk_decl",
+                            card.add_one_decoration(Program.I().mod_ocgcore_bs_atk_decoration,
+                                5, Vector3.zero, "atk").game_object);
                     }
                 }
                 byte mp = r.ReadByte();
@@ -11003,11 +11029,327 @@ public class Ocgcore : ServantWithCardDescription
     /// <summary>
     /// 「本帧画面上**真的有一批卡摊开、等着点『确认完毕』**」—— 由实时消息循环逐条累计
     /// （见 `someCardIsShowed = true` 那处），也就是游戏自己用来**挂/摘「确认完毕」按钮**的那个标志。
-    /// ⚠ 从 private 放成 public 是为了让 `Program.topDownPanAuto()` 能问它一句
-    ///   「现在要不要把取景自动弹到摊开那一行」（用户 2026-09-23 第 3 轮口径：
-    ///   「查看卡牌时…自动计算可以扩充的距离并**弹过去**」）。语义一个字没改，只是加了可见性。
+    /// ⚠ 从 private 放成 public 是为了让 `preFrameFunction` 能问它一句
+    ///   「摊开↔收摊这一拍要不要把玩家对取景的控制权交回自动值」
+    ///   （用户 2026-09-23 第 3 轮口径：「查看卡牌时…自动计算可以扩充的距离并**弹过去**」）。
+    ///   语义一个字没改，只是加了可见性。
     /// </summary>
     public bool someCardIsShowed = false;
+
+    /// <summary>
+    /// 上一次做「整场附属物朝向重设」时的 <see cref="Program.viewStamp"/>。
+    ///
+    /// ⛔⛔ **必须是 static**：MEMORY 红线 13 —— 发布 DLL 的字段布局必须与已烘焙资源逐字段对齐，
+    ///   <c>Ocgcore</c> 是挂在场景里的 MonoBehaviour，加**实例**字段会动布局。
+    ///   static 字段不参与 Unity 序列化 ⇒ 零风险。
+    /// </summary>
+    static int viewOrientStamp = -1;
+
+    /// <summary>
+    /// 切视角后把**场上所有卡**的附属物朝向重设一次（v3 修的 B2）。
+    ///
+    /// <para><b>为什么必须做</b>：卡**本体**的朝向来自 <c>Ocgcore.get_world_rotation(card)</c>
+    /// （x 恒 0 = 平铺，与视角无关）⇒ 本体不用管。真正随视角变的是**附属物**，而它们
+    /// **只在创建那一刻设一次朝向**；承载它们的 <c>UA_flush_all_gived_witn_lock</c> 有
+    /// <c>Distance &gt; 0.001</c> 闸 ⇒ 场上不动的卡**永不重算** ⇒ 切视角后**一直**停在旧角度。
+    /// 这是**真 bug**（不是过渡态）：用户反馈是「反复切视角，攻防数字与提示字一直错位」。</para>
+    ///
+    /// <para><b>为什么用「整场扫一次」而不是「每张卡各记一个戳」</b>：后者要在
+    /// <c>gameCard</c> 上加一个实例字段（踩红线 13）。整场扫只有一处 static 戳，
+    /// 而且语义更直白：「视角变过 ⇒ 全部重设一遍」。</para>
+    ///
+    /// <para>⚠ 调用点是 <c>realize()</c>（每拍都跑）：它比设置窗口那条路更可靠 ——
+    ///   探针的对局途中切视角（<c>qt_topdownmid.on</c>）走的是
+    ///   <c>Program.topDown = v</c> + <c>realize(true)</c>，不经过 <c>Setting</c>。
+    ///   幂等：戳相同就直接返回。</para>
+    /// </summary>
+    void refreshViewOrientationIfNeeded()
+    {
+        int stamp = Program.viewStamp;
+        if (stamp == viewOrientStamp)
+        {
+            return;
+        }
+        viewOrientStamp = stamp;
+        int n = 0;
+        for (int i = 0; i < cards.Count; i++)
+        {
+            if (cards[i] != null && cards[i].gameObject.activeInHierarchy)
+            {
+                cards[i].refreshViewOrientation();
+                // ★ 采一行 cardHint 的字形事实（防御数字）：cardHint 每张卡都在 ⇒ 一定打得到。
+                //    只打第一张（同一个材质），否则一场几十张卡会把日志堵满。
+                if (n == 1 && QuickTestTrace.SwitchOn("qt_sdfgrad.on"))
+                {
+                    cards[i].logCardHintFacts();
+                }
+                n++;
+            }
+        }
+        if (QuickTestTrace.Enabled)
+        {
+            // 汇总行用**另一个 tag**（`auxos`）：探针的 `auxo_of()` 认的是「每卡一行」那种格式，
+            // 汇总行混进去会让它把 fx/c/s 全解析成 None ⇒ 判据**空转**（绿也等于没验）。
+            QuickTestTrace.Log("auxos", "stamp=" + stamp + " view=" + (Program.topDown ? 1 : 0)
+                + " viewName=" + Program.view
+                + " frontX=" + Program.tableauFrontX.ToString("F0")
+                + " refreshed=" + n);
+            // ⭐ 每卡一行：探针要拿这些**实测欧拉角**判「切换视角后附属物真的跟上 tableauFrontX」。
+            //   `view=` 给 0/1（探针的 `view_of` 用 `view=(\d+)`），名字另给 `viewName=`。
+            for (int i = 0; i < cards.Count; i++)
+            {
+                if (cards[i] == null || !cards[i].gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+                cards[i].logViewAuxRow(stamp, Program.topDown ? 1 : 0, Program.tableauFrontX);
+            }
+        }
+    }
+
+    /// <summary>取一张卡**卡面**那个 quad 的屏幕 AABB（俯视/斜视都准）。
+    /// ⛔ 走 `transform.Find("card").Find("face")` 而不是 `gameCard.gameObject_face` ——
+    ///   那个字段是 protected，而且加 public getter 属于改可见性（虽然不是加字段），
+    ///   这里能不动 gameCard 就不动。</summary>
+    static Rect occCardRect(Camera cam, GameObject cardRoot, int yFlip)
+    {
+        if (cam == null || cardRoot == null)
+        {
+            return new Rect(0, 0, 0, 0);
+        }
+        // ⛔ 不猜路径也不猜网格尺寸：卡 prefab 的贴图 quad 挂在子节点上，
+        //   「用 lossyScale 当半长」是错的（那是缩放，不是网格尺寸）——
+        //   2026-09-28 实测那样算出 nContent=1。改成**在整棵子树里找 Renderer / Collider**，
+        //   直接用它们的 bounds（唯一权威的屏占来源）。
+        Renderer r = cardRoot.GetComponentInChildren<Renderer>();
+        if (r != null)
+        {
+            return occBoundsRect(cam, r.bounds, yFlip);
+        }
+        Collider col = cardRoot.GetComponentInChildren<Collider>();
+        if (col != null)
+        {
+            return occBoundsRect(cam, col.bounds, yFlip);
+        }
+        return new Rect(0, 0, 0, 0);
+    }
+
+    /// <summary>
+    /// 一个 NGUI widget 的屏幕 AABB。
+    ///
+    /// ⛔⛔ **不能只拿一台相机投影**：NGUI 面板挂在哪棵树下、哪台相机渲染它，是**运行期**决定的
+    /// （`Program.ui_main_2d` / `ui_back_ground_2d` 只是相机 rig，UIPanel 未必是它们的子节点）——
+    /// 2026-09-28 实测：对这两台 `GetComponentsInChildren&lt;UILabel&gt;` 返回**空**（nUI=0）。
+    /// ⇒ 改成「三台相机各投一遍，取**落在屏内且尺寸合理**的那一个」。
+    /// 判据口径：0 &lt; 宽 ≤ 屏宽、0 &lt; 高 ≤ 屏高、且矩形中心在屏内。斜视 3D 相机投 2D
+    /// widget 会得到垃圾值（跑出屏外或退化），所以这个「挑 plausible 的」是稳的。
+    /// </summary>
+    static Rect occUiRect(Camera[] cams, UILabel lb, int W, int H)
+    {
+        Vector3[] wc = lb.worldCorners;
+        if (wc == null || wc.Length < 4)
+        {
+            return new Rect(0, 0, 0, 0);
+        }
+        Rect best = new Rect(0, 0, 0, 0);
+        for (int i = 0; i < cams.Length; i++)
+        {
+            if (cams[i] == null)
+            {
+                continue;
+            }
+            Rect r = occAabb(cams[i], wc, H);
+            if (r.width <= 0 || r.height <= 0 || r.width > W || r.height > H)
+            {
+                continue;
+            }
+            float cx = r.xMin + r.width * 0.5f, cy = r.yMin + r.height * 0.5f;
+            if (cx < 0 || cx > W || cy < 0 || cy > H)
+            {
+                continue;
+            }
+            best = r;
+            break;
+        }
+        return best;
+    }
+
+    /// <summary>上一拍 UI 枚举的诊断计数（为什么 nUI 是这个数）。</summary>
+    static string occDiag = "";
+
+    /// <summary>一行 `[occ]` 元素记录：名字 + 客户区屏幕矩形（x0,y0,x1,y1，左上为原点）。</summary>
+    struct OccRect
+    {
+        public string name;
+        public Rect r;
+        public OccRect(string n, Rect rr) { name = n; r = rr; }
+    }
+
+    /// <summary>把一组世界角点投影成客户区屏幕 AABB。</summary>
+    static Rect occAabb(Camera cam, Vector3[] corners, int yFlip)
+    {
+        float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+        for (int i = 0; i < corners.Length; i++)
+        {
+            Vector3 s = cam.WorldToScreenPoint(corners[i]);
+            float py = yFlip - s.y;
+            if (s.x < x0) x0 = s.x;
+            if (s.x > x1) x1 = s.x;
+            if (py < y0) y0 = py;
+            if (py > y1) y1 = py;
+        }
+        return new Rect(x0, y0, x1 - x0, y1 - y0);
+    }
+
+    /// <summary>两台 2D 相机的取用（<c>Program.ui_main_2d / ui_back_ground_2d</c> 是 **GameObject**）。
+    /// 取不到就返回 null，由调用方跳过 —— 宁可少枚举一类元素，也不要抛异常打断探针。</summary>
+    static Camera occUiMain2D()
+    {
+        return Program.ui_main_2d == null ? null : Program.ui_main_2d.GetComponent<Camera>();
+    }
+
+    static Camera occUiBg2D()
+    {
+        return Program.ui_back_ground_2d == null ? null : Program.ui_back_ground_2d.GetComponent<Camera>();
+    }
+
+    /// <summary>一个对象的屏幕 AABB：先试 <see cref="Renderer"/>（贴图 quad），再退
+    /// <see cref="Collider"/>（卡 prefab 根上挂的是碰撞盒，没有 Renderer）。</summary>
+    /// <summary>世界 AABB → 屏幕 AABB（投 8 个角，x/y 各取 min/max）。</summary>
+    static Rect occBoundsRect(Camera cam, Bounds b, int yFlip)
+    {
+        Vector3[] c = new Vector3[8];
+        int n = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            c[n++] = new Vector3((i & 1) == 0 ? b.min.x : b.max.x,
+                                 (i & 2) == 0 ? b.min.y : b.max.y,
+                                 (i & 4) == 0 ? b.min.z : b.max.z);
+        }
+        return occAabb(cam, c, yFlip);
+    }
+
+    static Rect occRendererRect(Camera cam, GameObject go, int yFlip)
+    {
+        if (go == null)
+        {
+            return new Rect(0, 0, 0, 0);
+        }
+        Bounds b;
+        Renderer r = go.GetComponentInChildren<Renderer>();
+        if (r != null)
+        {
+            b = r.bounds;
+        }
+        else
+        {
+            Collider col = go.GetComponentInChildren<Collider>();
+            if (col == null)
+            {
+                return new Rect(0, 0, 0, 0);
+            }
+            b = col.bounds;
+        }
+        return occBoundsRect(cam, b, yFlip);
+    }
+
+    /// <summary>
+    /// **UI 障碍物**屏占探针（v3 / 需求③）。
+    ///
+    /// <para><b>为什么只报 UI、不报内容</b>：内容侧（手牌排 / 盘面）的屏占**探针脚本已经能量得很准**
+    /// —— `[hc]` / `[ohc]` 落点 + `[view] proj` 实测投影标尺（线性最小二乘），
+    /// 边距 47/46px 那些数就是这么来的。真正**只有游戏侧知道**的是「那些 UI 元素此刻在屏幕哪儿」：
+    /// NGUI widget 的屏占取决于**哪台相机在渲染它**（UIPanel 自己在 `baseCamera` 里解析），
+    /// 脚本在外面猜不出来（2026-09-28 实测：三台相机轮着投 + 「挑 plausible」那套，
+    /// 125 个 label 命中 0 个 —— 全被投影成退化的一个点）。</para>
+    ///
+    /// <para>⇒ 分工：<b>游戏侧只吐 UI 矩形，脚本做重叠判定</b>。一行一个元素：
+    /// <c>[ocrui] name=… R=x0,y0,x1,y1 cam=…</c>（客户区坐标、左上为原点）。</para>
+    ///
+    /// <para>⚠ 退化矩形（宽或高 &lt; 2px）一律跳过并计数 —— 那是「这个 widget 在屏幕上
+    /// 退化成一条线/一个点」，不是遮挡，报出来只会制造 ov=0/1 的假阳性。</para>
+    /// </summary>
+    public void occUiProbeTick()
+    {
+        if (!QuickTestTrace.Enabled || !Program.topDownLike)
+        {
+            return;
+        }
+        int W = Screen.width, H = Screen.height;
+        UILabel[] allLabels = UnityEngine.Object.FindObjectsOfType<UILabel>();
+        int nLab = 0, nOk = 0, nDeg = 0;
+        for (int li = 0; li < allLabels.Length; li++)
+        {
+            UILabel lb = allLabels[li];
+            nLab++;
+            if (lb == null || !lb.gameObject.activeInHierarchy || string.IsNullOrEmpty(lb.text))
+            {
+                continue;
+            }
+            // ⛔ 相机由 **UIPanel 自己**解析（`panel.baseCamera`）—— 这是 NGUI 渲染它用的那台。
+            //   不再「三台轮着投、挑 plausible」：那套实测 125 中 0。
+            Camera c = null;
+            if (lb.panel != null)
+            {
+                c = lb.panel.anchorCamera;
+            }
+            if (c == null)
+            {
+                c = Program.camera_back_ground_2d == null ? null
+                    : Program.camera_back_ground_2d.GetComponent<Camera>();
+            }
+            if (c == null)
+            {
+                continue;
+            }
+            Vector3[] wc = lb.worldCorners;
+            if (wc == null || wc.Length < 4)
+            {
+                continue;
+            }
+            Rect r = occAabb(c, wc, H);
+            if (r.width < 2f || r.height < 2f)
+            {
+                nDeg++;
+                continue;
+            }
+            nOk++;
+            // ⚠ `fit`：这个 widget 的盒子**是否就等于它的字**。
+            //   NGUI 的 `ShrinkContent` = 盒子自动收缩到文字大小 ⇒ 盒子 ≈ 可见油墨，
+            //   可以直接当遮挡矩形判；其余是**固定尺寸容器**（聊天窗、信息面板那种），
+            //   盒子里大半是透明留白 —— 拿它判遮挡会得到 770×925 这种**假阳性**
+            //   （2026-09-28 实测 `chat_` 报 x[390,1160] y[50,975]，而它真正可见的文字
+            //   只占左下角一小块）。⇒ 固定容器照样报出来，但标 `fit=0`，
+            //   由脚本决定「只报告不判红」—— **判据里不许出现拍脑袋的面积阈值。**
+            bool fit = lb.overflowMethod == UILabel.Overflow.ShrinkContent;
+            QuickTestTrace.Log("ocrui", "name=" + lb.gameObject.name
+                + " R=" + r.xMin.ToString("F0") + "," + r.yMin.ToString("F0") + ","
+                + r.xMax.ToString("F0") + "," + r.yMax.ToString("F0")
+                + " fit=" + (fit ? 1 : 0)
+                + " cam=" + c.name + " t=" + lb.text);
+        }
+        // 阶段大字：单独一支（它是 UITexture 不是 UILabel，且挂在 ui_main_2d 下）
+        if (gameField != null && gameField.occBigString != null)
+        {
+            Camera cBig = occUiMain2D();
+            Renderer rb = gameField.occBigString.GetComponent<Renderer>();
+            if (cBig != null && rb != null)
+            {
+                Rect r = occBoundsRect(cBig, rb.bounds, H);
+                if (r.width >= 2f && r.height >= 2f)
+                {
+                    nOk++;
+                    QuickTestTrace.Log("ocrui", "name=big_string"
+                        + " R=" + r.xMin.ToString("F0") + "," + r.yMin.ToString("F0") + ","
+                        + r.xMax.ToString("F0") + "," + r.yMax.ToString("F0")
+                        + " fit=1 cam=" + cBig.name + " t=-");
+                }
+            }
+        }
+        occDiag = "nLab=" + nLab + " nOk=" + nOk + " nDeg=" + nDeg;
+        QuickTestTrace.Log("ocrui", "SUMMARY " + occDiag + " screen=" + W + "x" + H);
+    }
+
 
     #region 卡组记牌（按钮 + 卡面）
 
@@ -11759,6 +12101,17 @@ public class Ocgcore : ServantWithCardDescription
                 + " inst=" + GetHashCode() + " on=" + deckMemoOn);
         }
         someCardIsShowed = false;
+        // v3（B2）：切视角后把场上所有卡的**附属物朝向**重设一次。
+        // ⛔ 必须排在下面那个 cards 循环**之前**：那循环会重置一批卡的状态，而重设只该做一次。
+        //   幂等 —— 视角戳没变时这里直接返回，所以每拍调它零成本。
+        // 为什么挂在 realize 而不是 Setting.onChangeTopDown：探针的对局途中切视角
+        // （qt_topdownmid.on）走的是 `Program.topDown = v` + `realize(true)`，不经过 Setting。
+        refreshViewOrientationIfNeeded();
+        // v3（需求③）：UI 障碍物屏占探针。只在俯视角 + 探针开关下跑（关态零成本、零影响）。
+        if (QuickTestTrace.Enabled && Program.topDownLike)
+        {
+            occUiProbeTick();
+        }
         float real = (Program.fieldSize - 1) * 0.9f + 1f;
         for (int i = 0; i < cards.Count; i++) if (cards[i].gameObject.activeInHierarchy)
             {
@@ -11984,7 +12337,17 @@ public class Ocgcore : ServantWithCardDescription
                 //    `handScale` 关态恒 1 ⇒ 半宽原样、逐字段等价旧实现。
                 if (line_index == 0)
                 {
-                    want_position.x = UIHelper.get_left_right_indexEnhanced(-10 * handScale, 10 * handScale, index, lines[line_index].Count, 5);
+                    // 🔑 v3 返工（2026-09-28 用户报「手牌不要和卡组/额外卡组穿模」）：
+                    //   半宽从 `10 * s` 收窄成 `TableauLayout.HandSpreadK * s`。
+                    //   K=10 ⇒ 排的外沿伸到 ±(10·1.5 + 1.5·1.5) = ±17.25，而卡组/额外那两列
+                    //   实测在 |x| ∈ [15.92, 18.92]（`[field] piles`：me deck x=17.42 / extra
+                    //   x=−18.07）⇒ **两者在 x 上相交**。K 由 `BoardHalfX` 现算（≈8.63），
+                    //   排的外沿落在 ±15.2，**不与它们重叠**，且留的是**保守**方向。
+                    //   ⛔ 关态 `HandSpreadK` 不参与（下面 `handScale` 关态恒 1 且本分支
+                    //   只在俯视的行带里走到；`K` 用的是常量表，不是 60° 语义）。
+                    float k0 = Program.topDownLike ? TableauLayout.HandSpreadK : 10f;
+                    want_position.x = UIHelper.get_left_right_indexEnhanced(
+                        -k0 * handScale, k0 * handScale, index, lines[line_index].Count, 5);
                 }
                 else
                 {
@@ -11999,19 +12362,21 @@ public class Ocgcore : ServantWithCardDescription
             }
         }
 
-        // 「拉镜头」的行程要够得着**最外那一行**：行带现在是往外堆的（`Program.tableauHandRowAbs`），
-        // 一副 40 张的卡组摊开能排到 |z| ≈ 50 —— 行程不跟着长就是「看得见但拉不到」。
+        // 「拉镜头」的行程要够得着**最外那一行**：行带是往外堆的（`Program.tableauHandRowAbs`），
+        // 一副 40 张的卡组摊开能排到 |z| ≈ 56 —— 行程不跟着长就是「看得见但拉不到」。
         // ⛔ 存的是**带符号**的 z（不是绝对值）：摊开我方卡堆时那一行在 −z 侧、摊开对方的在 +z 侧，
-        //    「自动弹过去」必须往**那一侧**弹（见 `Program.topDownPanAuto`）——
+        //    「自动弹过去」必须往**那一侧**弹（见 `TableauLayout.PanAuto`）——
         //    丢了符号就成了「往反方向弹」，越弹越看不见。
-        Program.topDownRowOuter = 0f;
+        // ⚠ 闲态时最外一行就是**手牌行自己**，`PanAuto()` 对它算出来恰是 0（行位置是常量之后
+        //   公式天然自洽）⇒ 不需要旧口径那道额外的「≤ CoverZ ⇒ 0」闸门。
+        TableauLayout.RowOuter = 0f;
         for (int k = 0; k < handLines; k++)
         {
             float az = tdRowZ[k] < 0f ? -tdRowZ[k] : tdRowZ[k];
-            float aout = Program.topDownRowOuter < 0f ? -Program.topDownRowOuter : Program.topDownRowOuter;
+            float aout = TableauLayout.RowOuter < 0f ? -TableauLayout.RowOuter : TableauLayout.RowOuter;
             if (az > aout)
             {
-                Program.topDownRowOuter = tdRowZ[k];
+                TableauLayout.RowOuter = tdRowZ[k];
             }
         }
 
@@ -12431,7 +12796,13 @@ public class Ocgcore : ServantWithCardDescription
             }
             // 行距同样要跟 `opHandScale` 一起放大（与我方同一个理由，见上面 `lines` 那一处）：
             // 只放大卡不放大行距 ⇒ 对方手牌会互相压住。关态 `opHandScale` 恒 1 ⇒ 原样。
-            want_position.x = UIHelper.get_left_right_indexEnhanced(10 * opHandScale, -10 * opHandScale, index, line.Count, 5);
+            // 同一个 K（与我方手牌行同一个 `TableauLayout.HandSpreadK`）—— 收窄的理由与
+            // 推导见上面 `lines[0]` 那一处的注释：K=10 时排的外沿会与卡组/额外那两列相交。
+            // ⛔⛔ 关态必须**逐字段等价旧实现**：下面那个 K 是俯视专属的
+            //   收窄值（0.80 次探针测到关态节距 137.8px vs 基线 159.3px 就是没门的结果）。
+            float opK = Program.topDownLike ? TableauLayout.HandSpreadK : 10f;
+            want_position.x = UIHelper.get_left_right_indexEnhanced(
+                opK * opHandScale, -opK * opHandScale, index, line.Count, 5);
             line[index].cookie_cared = true;
             line[index].UA_give_scale(opHandScale);
             line[index].UA_give_position(want_position);
@@ -13249,15 +13620,15 @@ public class Ocgcore : ServantWithCardDescription
             Program.cameraPosition.y = 23;
         }
         Program.cameraRotation = new Vector3(60, 0, 0);
-        // 俯视角下「回到最近的取景」的等价动作：把「拉镜头」的平移量设回**自动值** ——
-        // 有卡摊开等确认（`someCardIsShowed`）⇒ **一口气弹到底**（最外一行底缘 + 空位）；
-        // 平时 ⇒ 默认机位（`topDownPanRestZ`，最底下）。这就是用户 2026-09-23 第 3 轮说的
+        // 俯视角下「回到最近的取景」的等价动作：把玩家对「拉镜头」的控制权交回自动值 ——
+        // 有卡摊开等确认（`someCardIsShowed`）⇒ **一口气弹到底**（最外一行外沿 + 留白正好进屏）；
+        // 平时 ⇒ 自动值恒 0（静息机位）。这就是用户 2026-09-23 第 3 轮说的
         // 「查看卡牌时会像斜视角一样…自动计算可以扩充的距离并**弹过去**」——
         // 与上面那句 `cameraPosition.z = camera_min`（60°：把相机贴到最前那一张卡）是**同一个动作**，
-        // 只是俯视角没有「相机站位」这一维，等价物成了「取景中心沿桌面深耕滑过去」。
-        // ⚠ 第 5 轮起另有 `preFrameFunction` 的**每帧跟随**兜底 —— 实机里有的摊开路径不走
-        //   toNearest / 调用时机早于标志翻转 ⇒ 只在这里弹一次会「没生效」，那条兜住它。
-        Program.topDownPanAuto();
+        // 只是俯视角没有「相机站位」这一维，等价物成了「取景中心沿桌面纵深滑过去」。
+        // ⚠ 真正「弹」的那句在 `TableauLayout.NormalizePan()`（每帧挂在求机位处），这里只交权；
+        //   实机里有的摊开路径不走 toNearest / 调用时机早于标志翻转，只在这里弹一次会「没生效」。
+        TableauLayout.PanUserTook = false;
     }
 
     public gameCard GCS_cardCreate(GPS p)
@@ -13890,10 +14261,11 @@ public class Ocgcore : ServantWithCardDescription
         base.show();
         Program.I().light.transform.eulerAngles = new Vector3(50, -50, 0);
         Program.cameraPosition = new Vector3(0, 23, -18.5f - 3.2f * (Program.fieldSize - 1f) / 0.21f);
-        // 「拉镜头」的平移量设回**默认机位**：进一局就是一次新取景（默认机位 = 最底下，
-        // 见 `Program.topDownPanRestZ`）。不复位的话，上一局结束时滚到的位置会带到
-        // 这一局的第一个画面里。
-        Program.topDownPanZ = Program.topDownPanRestZ;
+        // 进一局就是一次新取景 ⇒ 把「拉镜头」的三个状态**整体**复位
+        // （`ResetPan`）。不复位的话，上一局结束时滚到的位置会带到这一局的第一个画面里。
+        // ⛔ 收摊（「确认完毕」）那一处**不再需要显式复位**：`NormalizePan` 每帧夹取，
+        //   行程一缩回 0，`PanZ` 自动回 0（v3 删掉了旧口径三处归零里的第三处）。
+        TableauLayout.ResetPan();
         Program.camera_game_main.transform.position = Program.cameraPosition*1.5f;
         Program.cameraRotation = new Vector3(60, 0, 0);
         Program.camera_game_main.transform.eulerAngles = Program.cameraRotation;
@@ -14314,16 +14686,15 @@ public class Ocgcore : ServantWithCardDescription
             }
         realize();
         toNearest();
-        // 「确认完毕」= 这一次确认结束 ⇒ 把「拉镜头」的平移量设回**默认机位**（最底下），
-        // 回到默认取景。
-        // ⛔ 必须排在 `toNearest()` **之后**：`toNearest` 里那句 `Program.topDownPanAuto()` 读的是
-        //    `topDownRowOuter`，而它由实时消息循环累计、点下按钮的**本帧**还没收摊
-        //    ⇒ toNearest 有可能把取景又弹回摊开位置。这一行是「确认结束」这个**事实**的落点，
-        //    不依赖那个字段的更新时机。
-        // ⛔ 为什么必须复位：滚轮量程随即缩回一个点（默认态自动值 == 默认机位），
-        //    收摊之后玩家**没有任何别的手段**把这笔平移挪回来 —— 留着就是一个挪不回去的取景。
-        //    （`Ocgcore.preFrameFunction` 的每帧跟随下一帧也会兜到，这里同帧先落定。）
-        Program.topDownPanZ = Program.topDownPanRestZ;
+        // 「确认完毕」= 这一次确认结束 ⇒ 把玩家对取景的控制权交回自动值。
+        // ⛔ v3 **不再在这里显式写 `PanZ`**：滚轮量程随收摊缩回 0，而
+        //   `TableauLayout.NormalizePan()`（每帧挂在 `Program.fixALLcamerasPreFrame`
+        //   的求机位处）下一帧就把 `PanZ` 夹回自动值 —— 而自动值在收摊后**恒等于 0**。
+        //   旧口径那句「必须排在 toNearest 之后、因为 toNearest 读的那几个字段当帧还没更新」
+        //   的时序顾虑**整条消失**：新模型不依赖 `RowOuter` 的更新时机。
+        // ⛔ 为什么必须复位：滚轮量程随即缩回一个点，收摊之后玩家**没有任何别的手段**
+        //   把这笔平移挪回来 —— 留着就是一个挪不回去的取景。
+        TableauLayout.PanUserTook = false;
     }
 
     public delegate void responseHandler(byte[] buffer);

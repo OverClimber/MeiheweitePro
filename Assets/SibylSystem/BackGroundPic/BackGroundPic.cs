@@ -42,6 +42,12 @@ public class BackGroundPic : Servant
         {
             return;
         }
+        // ⛔⛔ **背景只看模式，不看视角**（v3 返工，2026-09-28 用户报「俯视角下背景丢失了」）。
+        //   v3 上一版在这里按 `topDownLike` 换成了 `desk_flat.jpg`（程序化深色渐晕）——
+        //   那张图暗到 17,19,24，铺满屏之后**看着就是背景没了**；更本质的是它
+        //   **违反了需求①**（「普通视角和俯视角必须没有任何互相影响」）：背景是
+        //   OCG/RD 的属性，视角切换无权改它。
+        //   ⇒ 这一行就是全部口径：**模式决定背景，视角不参与**。
         Texture2D pic = mode == GameModeManager.Mode.RD ? rdTexture : ocgTexture;
         if (pic == null)
         {

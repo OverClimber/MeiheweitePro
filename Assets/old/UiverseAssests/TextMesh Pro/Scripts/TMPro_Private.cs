@@ -2829,10 +2829,20 @@ namespace TMPro
                     switch (m_verticalMapping)
                     {
                         case TextureMappingOptions.Character:
-                            m_uv2s[vert_index_X4 + 0].y = 0 + m_uvOffset.y;
-                            m_uv2s[vert_index_X4 + 1].y = 1 + m_uvOffset.y;
-                            m_uv2s[vert_index_X4 + 2].y = 0 + m_uvOffset.y;
-                            m_uv2s[vert_index_X4 + 3].y = 1 + m_uvOffset.y;
+                            // 修复（2026-09-29，攻防数字发糊根因）：SDF 系 shader（TMPro_SDF*.shader）
+                            // 把 texcoord1.y 当**缩放比**读 —— `scale *= abs(texcoord1.y) * _GradientScale * 1.5`
+                            // （TMPro_SDF.shader:168 等），并把 `bold = step(texcoord1.y, 0)` 也挂在它上面。
+                            // 而 2014 版 mesh 生成器写的是贴图映射坐标 {0,1,0,1}：每个字形 quad 底部
+                            // 两顶点 scale=0 ⇒ 片元 alpha = saturate(0-(-0.5)) = **0.5 恒上限** ⇒
+                            // 笔画下半永远中灰、没有实心黑芯（相机拉远后整笔渐灰，用户报的「俯视角模糊」）。
+                            // 这里改写常量 1 = 「正常字重 + 满缩放比」——与新版 TMP 的 uv2 语义对齐；
+                            // 抗锯齿宽度自此由 shader 里按相机距离的 rsqrt 项自适应。
+                            // ⛔ 只动 Character 分支：TMPro_Bitmap*.shader 仍把 texcoord1 当真 UV 用，
+                            //   本项目五套字体全部为 SDF，无 bitmap 冲突；Line/Paragraph/MatchAspect 不碰。
+                            m_uv2s[vert_index_X4 + 0].y = 1;
+                            m_uv2s[vert_index_X4 + 1].y = 1;
+                            m_uv2s[vert_index_X4 + 2].y = 1;
+                            m_uv2s[vert_index_X4 + 3].y = 1;
                             break;
 
                         case TextureMappingOptions.Line:
