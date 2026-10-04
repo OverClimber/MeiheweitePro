@@ -34,6 +34,23 @@ namespace YGOSharp
         }
 
         /// <summary>
+        /// 遍历当前模式那一个池里的每一张卡（卡号 + 卡对象）。
+        /// 给「整池自查」用 —— 例如「没改过名的卡是不是也报了 HasOverride」，
+        /// 这种问题只有把 1 万多张全扫一遍才看得出来，看几张是看不出来的。
+        /// </summary>
+        internal static void ForEachActiveCard(Action<int, Card> visit)
+        {
+            if (visit == null)
+            {
+                return;
+            }
+            foreach (KeyValuePair<int, Card> item in ActiveCards)
+            {
+                visit(item.Key, item.Value);
+            }
+        }
+
+        /// <summary>
         /// 当前模式那个池里，带**任一位**被 raceMask 命中的卡有几张（排查/验收用，同 CountOf 的性质）。
         ///
         /// 存在的意义：把「勾了某个种族到底能不能搜到」变成一个**离线可判**的数。
@@ -141,6 +158,262 @@ namespace YGOSharp
         {
             _cards = new Dictionary<int, Card>();
             _cards_rd = new Dictionary<int, Card>();
+            poolStamp++;
+            InvalidateNameTranslation();
+        }
+
+        // ============================================================ 卡名翻译
+        //
+        // 需求 5 的落地：**显示用的 Name/Desc 全部由「cdb 原文 + 当前翻译表」重算**。
+        // 三个好处：
+        //   ① 换翻译后，卡表 / 检索结果 / 对局日志 / 左侧说明 —— 所有读 card.Name 的地方一起变；
+        //   ② 描述里引用的卡名（中文卡文一律写作「卡名」）跟着一起换，
+        //      所以把「卡通世界」改成「童话书」后，所有"记述了卡通世界"的描述同步变「童话书」；
+        //   ③ 单张卡的自定义外号与全局翻译表是两套数据，换全局时不动单张（见 CardNameTranslation）。
+        //
+        // 性能：只在「池子换代」或「翻译版本变了」时重算一次全池，之后显示与检索都是查表；
+        // NameStamp 让富文本缓存知道该作废了。
+
+        /// <summary>某一池的两张索引：原生名→卡号（重写描述用）、显示名→卡号（点击反查用）。</summary>
+        private class PoolIndex
+        {
+            public IDictionary<int, Card> pool;
+            public int poolStamp = -1;
+            public int version = -1;
+            public Dictionary<string, int> nativeToId = new Dictionary<string, int>();
+            public Dictionary<string, int> displayToId = new Dictionary<string, int>();
+        }
+
+        private static PoolIndex indexOcg = new PoolIndex();
+        private static PoolIndex indexRd = new PoolIndex();
+
+        /// <summary>
+        /// 「异画」分组：卡号 → 它所在异画组的**组主**卡号。
+        ///
+        /// 判据（本机 14981 张实测：580 张带 alias 的卡里 562 张与本卡**同名** = 异画；
+        /// 另外 18 张不同名 = 水波海豚 / 海洋海豚 这种**真·不同的卡**，绝不能并组）：
+        ///   alias != 0 &amp;&amp; alias != id &amp;&amp; 池里 alias 那张卡的**原文卡名**与本卡逐字相同 → 同一组。
+        /// 组主 = alias 指向的那张卡；找不到人、或者名字对不上，就自己当组主。
+        ///
+        /// 只在池子换代时重建一次（全池一趟），之后改名/查名都是字典查询 —— 需求 6 的「不进每帧」。
+        /// </summary>
+        private static Dictionary<int, int> aliasRootOcg = new Dictionary<int, int>();
+        private static Dictionary<int, int> aliasRootRd = new Dictionary<int, int>();
+        private static int aliasRootStamp = -1;
+
+        private static void EnsureAliasGroups()
+        {
+            if (aliasRootStamp == poolStamp)
+            {
+                return;
+            }
+            aliasRootOcg = BuildAliasRoot(_cards);
+            aliasRootRd = BuildAliasRoot(_cards_rd);
+            aliasRootStamp = poolStamp;
+        }
+
+        private static Dictionary<int, int> BuildAliasRoot(IDictionary<int, Card> pool)
+        {
+            Dictionary<int, int> root = new Dictionary<int, int>(pool.Count);
+            foreach (KeyValuePair<int, Card> item in pool)
+            {
+                Card card = item.Value;
+                int r = card.Id;
+                if (card.Alias > 0 && card.Alias != card.Id)
+                {
+                    Card main;
+                    if (pool.TryGetValue(card.Alias, out main)
+                        && !string.IsNullOrEmpty(main.nativeName)
+                        && main.nativeName == card.nativeName)
+                    {
+                        r = card.Alias;
+                    }
+                }
+                root[card.Id] = r;
+            }
+            // alias 还可能再串一级（A ← B ← C）：把指向组主的节点一路收敛到最顶层。
+            foreach (KeyValuePair<int, Card> item in pool)
+            {
+                int r = root[item.Key];
+                for (int hop = 0; hop < 4; hop++)
+                {
+                    int up;
+                    if (r == item.Key || !root.TryGetValue(r, out up) || up == r)
+                    {
+                        break;
+                    }
+                    r = up;
+                }
+                root[item.Key] = r;
+            }
+            return root;
+        }
+
+        /// <summary>当前模式下这张卡所属异画组的组主卡号（没有异画关系就是它自己）。</summary>
+        internal static int AliasRootOf(int id)
+        {
+            EnsureAliasGroups();
+            int root;
+            Dictionary<int, int> map = GameModeManager.IsRD ? aliasRootRd : aliasRootOcg;
+            if (map.TryGetValue(id, out root))
+            {
+                return root;
+            }
+            return id;
+        }
+
+        /// <summary>当前模式下这张卡的异画组里有几张卡（含自己；1 = 没有异画）。</summary>
+        internal static int AliasGroupSize(int id)
+        {
+            EnsureAliasGroups();
+            int root = AliasRootOf(id);
+            Dictionary<int, int> map = GameModeManager.IsRD ? aliasRootRd : aliasRootOcg;
+            int n = 0;
+            foreach (KeyValuePair<int, int> item in map)
+            {
+                if (item.Value == root)
+                {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        private static int nameStampCounter = 0;
+        private static int translatedVersion = -1;
+
+        /// <summary>索引/译名代次。任何一次重算都会 +1，富文本缓存拿它当失效判据。</summary>
+        internal static int NameStamp
+        {
+            get { EnsureNameTranslation(); return nameStampCounter; }
+        }
+
+        /// <summary>当前模式那一池的「显示名 → 卡号」索引（点击文本里的卡名要反查它）。</summary>
+        internal static Dictionary<string, int> DisplayNameIndex
+        {
+            get
+            {
+                EnsureNameTranslation();
+                return (GameModeManager.IsRD ? indexRd : indexOcg).displayToId;
+            }
+        }
+
+        /// <summary>当前模式那一池的「原生名 → 卡号」索引。</summary>
+        internal static Dictionary<string, int> NativeNameIndex
+        {
+            get
+            {
+                EnsureNameTranslation();
+                return (GameModeManager.IsRD ? indexRd : indexOcg).nativeToId;
+            }
+        }
+
+        internal static void InvalidateNameTranslation()
+        {
+            indexOcg.poolStamp = -1;
+            indexRd.poolStamp = -1;
+            translatedVersion = -1;
+        }
+
+        /// <summary>用户换了全局翻译 / 改了某张卡的外号后调这里：立刻重算一遍全池。</summary>
+        internal static void ReapplyNameTranslation()
+        {
+            CardNameTranslation.Ensure();
+            InvalidateNameTranslation();
+            EnsureNameTranslation();
+        }
+
+        private static void EnsureNameTranslation()
+        {
+            CardNameTranslation.Ensure();
+            // 先建好异画分组：ApplyPool 里的 DisplayName 会按组取自定义名字，
+            // 这一句保证它拿到的是「池子已经装完」之后的分组，而不是加载途中的半成品。
+            EnsureAliasGroups();
+            if (indexOcg.poolStamp == poolStamp && indexRd.poolStamp == poolStamp
+                && translatedVersion == CardNameTranslation.Version)
+            {
+                return;
+            }
+            ApplyPool(indexOcg, _cards);
+            ApplyPool(indexRd, _cards_rd);
+            translatedVersion = CardNameTranslation.Version;
+            nameStampCounter++;
+        }
+
+        private static void ApplyPool(PoolIndex index, IDictionary<int, Card> pool)
+        {
+            index.pool = pool;
+            index.poolStamp = poolStamp;
+            index.version = CardNameTranslation.Version;
+            index.nativeToId.Clear();
+            index.displayToId.Clear();
+
+            // 第一遍：用原文建「原生名 → 卡号」，并算出每张卡该显示成什么名字。
+            int count = pool.Count;
+            List<string> natives = new List<string>(count);
+            List<string> displays = new List<string>(count);
+            foreach (KeyValuePair<int, Card> item in pool)
+            {
+                Card card = item.Value;
+                string native = card.nativeName;
+                if (string.IsNullOrEmpty(native))
+                {
+                    native = card.Name;
+                    card.nativeName = native;
+                }
+                if (string.IsNullOrEmpty(card.nativeDesc))
+                {
+                    card.nativeDesc = card.Desc;
+                }
+                natives.Add(native);
+                string display = CardNameTranslation.DisplayName(item.Key, native);
+                displays.Add(display);
+                if (!index.nativeToId.ContainsKey(native))
+                {
+                    index.nativeToId[native] = item.Key;
+                }
+                if (!index.displayToId.ContainsKey(display))
+                {
+                    index.displayToId[display] = item.Key;
+                }
+            }
+
+            // 第二遍：整张表算齐了再重写描述 —— 边算边用会让「先出现的卡」看不到「后出现的卡」的译名。
+            Dictionary<string, string> nameMap = new Dictionary<string, string>();
+            for (int i = 0; i < count; i++)
+            {
+                if (!string.IsNullOrEmpty(natives[i]) && displays[i] != natives[i]
+                    && !nameMap.ContainsKey(natives[i]))
+                {
+                    nameMap[natives[i]] = displays[i];
+                }
+            }
+            // 系列（字段）译名（需求 3）也并进同一张 map：中文卡文把字段名也写成「」引用
+            //（RewriteDesc 的注释里实测 17065 处能对上"卡名/字段"），所以「改了系列译名
+            // 也要作用在简介上」这一条，靠的就是这里 —— **卡名优先**（先卡名后字段，
+            // 同名时卡名的那条已占位，不会被字段顶掉）。
+            Dictionary<string, string> fieldMap = CardNameTranslation.FieldMapForCurrentPack();
+            if (fieldMap != null)
+            {
+                foreach (KeyValuePair<string, string> kv in fieldMap)
+                {
+                    if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value)
+                        && !nameMap.ContainsKey(kv.Key))
+                    {
+                        nameMap[kv.Key] = kv.Value;
+                    }
+                }
+            }
+            int k = 0;
+            foreach (KeyValuePair<int, Card> item in pool)
+            {
+                Card card = item.Value;
+                card.Name = displays[k];
+                card.Desc = nameMap.Count > 0
+                    ? CardNameTranslation.RewriteDesc(card.nativeDesc, nameMap)
+                    : card.nativeDesc;
+                k++;
+            }
         }
 
         /// <summary>
@@ -232,6 +505,11 @@ namespace YGOSharp
             return returnValue;
         }
 
+        /// <summary>
+        /// 卡池换代的戳。装载 / 清空都会 +1 —— 卡名索引与描述重写都靠它判断"要不要重算"。
+        /// </summary>
+        private static int poolStamp = 0;
+
         private static void LoadCard(IDictionary<int, Card> pool, IDataRecord reader, bool replace)
         {
             Card card = new Card(reader);
@@ -244,6 +522,7 @@ namespace YGOSharp
                 pool.Remove(card.Id);
                 pool.Add(card.Id, card);
             }
+            poolStamp++;
         }
 
         internal static void updateSetNames()
@@ -285,6 +564,7 @@ namespace YGOSharp
             uint getCatagoryFilter
             )
         {
+            EnsureNameTranslation();
             List<Card> returnValue = new List<Card>();
             IDictionary<int, Card> pool = ActiveCards;
             foreach (var item in pool)
@@ -292,10 +572,10 @@ namespace YGOSharp
                 Card card = item.Value;
                 if ((card.Type & (uint)CardType.Token) == 0)
                 {
-                    if (getName == "" 
-                        || Regex.Replace(card.Name, getName,"miaowu", RegexOptions.IgnoreCase) != card.Name
-                        || Regex.Replace(card.Desc, getName, "miaowu", RegexOptions.IgnoreCase) != card.Desc
-                        || Regex.Replace(card.strSetName, getName, "miaowu", RegexOptions.IgnoreCase) != card.strSetName
+                    if (getName == ""
+                        || ContainsLiteral(card.Name, getName)
+                        || ContainsLiteral(card.Desc, getName)
+                        || ContainsLiteral(card.strSetName, getName)
                         || card.Id.ToString() == getName
                         )
                     {
@@ -355,6 +635,28 @@ namespace YGOSharp
 
         static string nameInSearch = "";
 
+        /// <summary>
+        /// 关键字命中判定 —— **纯文本包含，不走正则**。
+        ///
+        /// 老实现把关键字当正则塞进 Regex.Replace 再看结果变没变，两个毛病：
+        ///   ① 卡名带正则元字符就会炸（"BFS(炖牛肉)装甲" 的圆括号、"No.39 …" 的点），
+        ///      而需求 1~4 会让**卡名本身**成为检索词，点一下就是一次崩溃；
+        ///   ② 每次比较都要跑一遍正则，卡池上万张卡 × 3 个字段 = 一次检索几万次正则 —— 会卡。
+        /// 这里换成 OrdinalIgnoreCase 子串查找：语义正是搜的人想要的"包含"。
+        /// </summary>
+        static bool ContainsLiteral(string haystack, string needle)
+        {
+            if (string.IsNullOrEmpty(needle))
+            {
+                return true;
+            }
+            if (string.IsNullOrEmpty(haystack))
+            {
+                return false;
+            }
+            return haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         static bool judgeint(int min, int max, int raw)
         {
             bool re = true;
@@ -382,15 +684,16 @@ namespace YGOSharp
             List<int> getsearchCode
             )
         {
+            EnsureNameTranslation();
             List<Card> returnValue = new List<Card>();
             IDictionary<int, Card> pool = ActiveCards;
             foreach (var item in pool)
             {
                 Card card = item.Value;
                 if (getName == ""
-                        || Regex.Replace(card.Name, getName, "miaowu", RegexOptions.IgnoreCase) != card.Name
-                        //|| Regex.Replace(card.Desc, getName, "miaowu", RegexOptions.IgnoreCase) != card.Desc
-                        || Regex.Replace(card.strSetName, getName, "miaowu", RegexOptions.IgnoreCase) != card.strSetName
+                        || ContainsLiteral(card.Name, getName)
+                        //|| ContainsLiteral(card.Desc, getName)
+                        || ContainsLiteral(card.strSetName, getName)
                         || card.Id.ToString() == getName
                         )
                 {

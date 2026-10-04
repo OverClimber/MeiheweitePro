@@ -188,9 +188,15 @@ public class AIRoom : WindowServantSP
     public static bool IsAiSessionLive = false;
 
     /// <summary>
-    /// 决斗中多久没有任何入站包就认为对手卡住了。取 2 分钟：
-    /// WindBot 正常出手是毫秒级，服务器也不会沉默这么久；而玩家自己想事情时
-    /// 服务器同样不发包，所以这条**只提示、不自动收局**，避免误伤正常思考。
+    /// **轮到电脑动**的时候，多久没有任何入站包就认为对手卡住了。取 2 分钟：
+    /// WindBot 正常出手是毫秒级，服务器也不会沉默这么久。
+    ///
+    /// <para>⛔ 这条计时**只在 <c>Ocgcore.isOpponentTurn</c> 为真时累计**
+    /// （2026-10-03，用户口径「只去记电脑能操作的场合」）。原先它只看「多久没有入站包」，
+    /// 于是玩家自己想事情超过 2 分钟也会被弹「电脑对手已 2 分钟没有响应」——
+    /// 球在玩家手里，服务器本来就不发包，那不是卡死。</para>
+    ///
+    /// <para>并且它**只提示、不自动收局**：宁可漏报一次，也不替玩家做决定。</para>
     /// </summary>
     private const int StallSilenceMs = 120000;
 
@@ -320,11 +326,30 @@ public class AIRoom : WindowServantSP
             lastInboundSeenMs = now;
             return;
         }
+        // 🔑 2026-10-03：**只判「轮到电脑动」的那段时间**（用户口径「只去记电脑能操作的场合」）。
+        //
+        // 缺陷（用户报「自己 2 分钟没动作也会跳」）：原口径只看「多久没有入站包」，
+        // 于是**玩家自己**想事情超过 2 分钟也一样被判成「电脑对手卡死」。
+        // 但那段时间客户端根本没理由收到包 —— 球在玩家手里，它不动是正常的。
+        //
+        // 判据用 <c>Ocgcore.turnOwner</c>（core 唯一的 NewTurn 宣布，见其头注）：
+        //   turnOwner == 1 → 轮到电脑，这一秒的静默才有意义；
+        //   turnOwner == 0 → 轮到我方（玩家在想事情），静默**不累计**；
+        //   turnOwner == -1 → 还没到第一个 NewTurn（开局发牌），同样不累计。
+        // ⛔ 用「不累计」而不是「直接 return」：不 return 才能顺带把
+        //   <c>stallNotified</c> 在恢复后复位，否则玩家一动，对局又安静下来时
+        //   那条提示再也不会重新出现（一次误报就把它作废了）。
+        if (!Program.I().ocgcore.isOpponentTurn)
+        {
+            lastInboundSeenMs = now;
+            stallNotified = false;
+            return;
+        }
         int silence = now - lastInboundSeenMs;
         if (silence > StallSilenceMs && !stallNotified)
         {
             stallNotified = true;
-            QuickTestTrace.Log("wd", "看门狗：决斗中已 " + (silence / 1000)
+            QuickTestTrace.Log("wd", "看门狗：**轮到电脑的回合**已 " + (silence / 1000)
                 + "s 没有入站包（包总数停在 " + inbound + "），对手疑似卡死");
             DumpAiStallSnapshot("决斗静默 " + (silence / 1000) + "s（包总数停在 " + inbound + "）");
             RMSshow_none(InterString.Get("电脑对手已 2 分钟没有响应，可认输或退出后重开。"));

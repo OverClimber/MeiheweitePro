@@ -150,7 +150,9 @@ public class DeckManager : ServantWithCardDescription
     {
         base.applyHideArrangement();
         Program.cameraFacing = false;
-        iTween.MoveTo(gameObjectSearch, Program.camera_main_2d.ScreenToWorldPoint(new Vector3(Screen.width + 600, Screen.height / 2, 600)), 1.2f);
+        moveSearchPanel(false);
+        // 本窗（点链接弹出的检索窗）若正开着：编辑器面板一走，它就让回来、贴回右侧原位。
+        NotifyCardSearchRelayout();
         refreshDetail();
     }
 
@@ -158,11 +160,62 @@ public class DeckManager : ServantWithCardDescription
     {
         base.applyShowArrangement();
         Program.cameraFacing = true;
-        UITexture tex = UIHelper.getByName<UITexture>(gameObjectSearch, "under_");
-        tex.height = Screen.height;
-        iTween.MoveTo(gameObjectSearch, Program.camera_main_2d.ScreenToWorldPoint(new Vector3(Screen.width - tex.width / 2, Screen.height / 2, 0)), 1.2f);
+        // ⚠ 不再「借走」这个落点（用户 2026-10-02 口径）：两块检索面板**并排**——
+        //   编辑器这张永远留在屏幕最右，点链接弹出那颗窗左移到它**左边**。
+        //   （旧做法是把编辑器面板整块挪出屏幕、由那颗窗顶替，见已删掉的 yieldSearchPanel。）
+        //   这里照常把自己的面板滑进来，再通知那颗窗按新的人占位重排一次。
+        moveSearchPanel(true);
+        NotifyCardSearchRelayout();
         refreshDetail();
     }
+
+    /// <summary>
+    /// 本编辑器面板的显隐/换边会让「点链接弹出的检索窗」的并排位变掉，通知它重排。
+    /// 那颗窗自己判断「面板在不在、宽多少」，这里不做几何运算（单一真源在那边）。
+    /// </summary>
+    void NotifyCardSearchRelayout()
+    {
+        try
+        {
+            if (Program.I() != null && Program.I().cardSearch != null)
+            {
+                Program.I().cardSearch.onDeckSearchPanelToggled();
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+    }
+
+    /// <summary>
+    /// 右侧检索面板滑进 / 滑出屏幕。
+    /// ⚠ 它现在**只有一个调用者**了：旧版还被「点链接弹出的检索窗」借去当落点
+    ///   （yieldSearchPanel，已随「两窗并排」口径删除）。
+    /// </summary>
+    void moveSearchPanel(bool show)
+    {
+        if (gameObjectSearch == null)
+        {
+            return;
+        }
+        UITexture tex = UIHelper.getByName<UITexture>(gameObjectSearch, "under_");
+        float w = tex != null ? tex.width : Screen.width * 0.4f;
+        if (show && tex != null)
+        {
+            tex.height = Screen.height;
+        }
+        iTween.MoveTo(gameObjectSearch, Program.camera_main_2d.ScreenToWorldPoint(
+            show ? new Vector3(Screen.width - w / 2, Screen.height / 2, 0)
+                 : new Vector3(Screen.width + 600, Screen.height / 2, 600)), 1.2f);
+    }
+
+    /// <summary>
+    /// 「借走落点」那套互斥（<c>searchPanelYielded</c> / <c>yieldSearchPanel</c>）已按
+    /// 用户 2026-10-02 口径**整体删除**：两块检索面板改成**并排**（编辑器在最右、
+    /// 点链接弹的那颗窗在它左边），不再需要谁把谁挪出屏幕。
+    /// 现在两边唯一的联动是 <see cref="NotifyCardSearchRelayout"/> 那条通知。
+    /// </summary>
 
     void onLF()
     {
@@ -487,32 +540,21 @@ public class DeckManager : ServantWithCardDescription
         }
     }
 
-    /// <summary>「收起界面」动画的时长（毫秒）。取界面自带关窗动画里最长的一条（列表滑出 1.2 秒）。</summary>
-    private const int TestHideAnimMs = 1250;
-
     /// <summary>
-    /// 「进入测试战斗时播放动画」开关，读设置窗口里的 testHideAnim_（系统设置 → 最底下一行）。
-    /// 默认关 = 点「测试」直接藏界面就开局；开了 = 先播收起动画（1.25 秒）再开局。
+    /// ⛔ 「进入测试战斗时播放动画」这整个功能**已按用户 2026-10-03 口径删除**：
+    /// 原来点「测试」会先播 1.25 秒的收起动画再开局，开关读设置窗口的 <c>testHideAnim_</c>
+    /// （那一行也一并删了）。现在恒等于「原来开关关掉时」那条路 —— 直接藏界面就开局。
     /// </summary>
-    private static bool TestHideAnim
-    {
-        get { return UIHelper.fromStringToBool(Config.Get("testHideAnim_", "0")); }
-    }
 
     /// <summary>正在走「收起界面 + 开局」的转场，用来挡住连点。</summary>
     private bool testLaunching = false;
 
     /// <summary>
-    /// 点「测试」之后的转场：先把卡组界面**带动画地收起来**，动画放完再走原来的开局链路。
+    /// 点「测试」之后的转场：**直接把卡组界面藏掉**就开局。
     ///
-    /// 为什么必须等动画放完：launchQuickTest() 里有两段**同步等待**（起 AI.Server、
-    /// 等 WindBot 就绪），主线程会被阻塞约 0.7 秒 —— 这段时间 Unity 一帧都渲染不了。
-    /// 动画放一半撞上阻塞就会定格在半路，比不做还难看。
-    ///
-    /// 用的是界面自带的关窗动画（applyHideArrangement）：工具条下滑 0.6 秒、
-    /// 卡牌列表滑出 1.2 秒、3D 视角转走。这一步**不销毁任何数据**，
-    /// 真正的清理由随后那次 hide() 完成 —— 和原来在 DuelStart 时做的是同一件事，
-    /// 只是提前到了这里（此前那 4.9 秒里卡组界面一直杵在屏幕上、玩家什么都点不动）。
+    /// ⛔ 原先这里会先播 1.25 秒的收起动画（applyHideArrangement）再开局，那是设置项
+    ///   <c>testHideAnim_</c> 打开时的行为 —— 用户 2026-10-03 要求连开关一起删掉，
+    ///   所以现在只剩「直接藏」这一条路（＝原来开关关掉时的那条）。
     ///
     /// 开局起不来（AI.Server / WindBot 没起来）时要把卡组界面放回去再报错：
     /// 提示是弹在卡牌说明面板里的，界面没回来就等于弹在空屏上。
@@ -520,21 +562,9 @@ public class DeckManager : ServantWithCardDescription
     void startTestLaunch()
     {
         testLaunching = true;
-        if (!TestHideAnim)
-        {
-            // 对比用：跳过收起动画，直接藏掉就开局
-            QuickTestTrace.Log("click", "收起动画已禁用（TestHideAnim=false），直接 hide 后开局");
-            hide();
-            tryLaunchWithRecovery();
-            return;
-        }
-        QuickTestTrace.Log("click", "先收起卡组界面，动画 " + TestHideAnimMs + "ms 后再开局");
-        applyHideArrangement();
-        Program.go(TestHideAnimMs, () =>
-        {
-            hide();
-            tryLaunchWithRecovery();
-        });
+        QuickTestTrace.Log("click", "点「测试」：不做收起动画，直接 hide 后开局");
+        hide();
+        tryLaunchWithRecovery();
     }
 
     /// <summary>开局 + 失败恢复：起不来就把卡组界面放回来再报错（提示弹在说明面板里，空屏上看不见）。</summary>
@@ -726,6 +756,16 @@ public class DeckManager : ServantWithCardDescription
     }
 
     bool detailShowed = false;
+
+    /// <summary>
+    /// 「分类」弹窗（gameObjectDetailedSearch）现在开没开。
+    ///
+    /// 给谁用：点链接弹出的检索窗（<see cref="CardSearchWindow"/>）。它的开合与这颗
+    /// 弹窗要**互斥**：弹窗开着时检索窗不该压上来（弹窗会被借位机制拖出屏幕，
+    /// 或者两块叠在一起）；反过来检索窗开着时玩家也点不到弹窗 —— 两边都靠这个
+    /// 属性做判据（见 CardSearchWindow.preFrameFunction 的让位/回归逻辑）。
+    /// </summary>
+    public bool DetailPopupOpen { get { return detailShowed; } }
 
     void showDetail()
     {
@@ -1061,6 +1101,71 @@ public class DeckManager : ServantWithCardDescription
     }
 
     public YGOSharp.Banlist currentBanlist = null;
+
+    /// <summary>
+    /// 译名换过之后把**检索列表**重印一遍。
+    ///
+    /// 为什么需要：列表项上的字（卡名 + 简表）是 print() 当时拼好的**字符串**，
+    /// 换译名不会把它们改掉；而 print 的入参 PrintedResult 存的是卡池对象，
+    /// 名字已经被 CardsManager.ApplyPool 就地改好了，所以重印一次就同步了。
+    ///
+    /// 卡组里的卡是**贴图**（MonoCardInDeckManager 只换 face 的 mainTexture），
+    /// 没有文字，不用管。
+    /// </summary>
+    public void refreshNames()
+    {
+        if (!isShowed || PrintedResult == null || PrintedResult.Count == 0)
+        {
+            return;
+        }
+        print(PrintedResult);
+    }
+
+    /// <summary>
+    /// 译名 / 外号改过之后，把**桌面上的卡**整批换新（需求 2026-10-02 修复）。
+    ///
+    /// 为什么 <see cref="refreshNames"/> 不够：那条只重印**右侧检索列表**
+    /// （PrintedResult，直接引用池卡，池卡被 <c>ReapplyNameTranslation</c> 改过名字）。
+    /// 而桌面上每张 <see cref="MonoCardInDeckManager"/> 拿的 cardData 是
+    /// <see cref="YGOSharp.CardsManager.Get"/> 的**副本**（内部是 <c>pool[id].clone()</c>）
+    /// —— 重算译名只改池子，副本上的名字**冻结在创建那一刻**。
+    /// 表现就是用户实测的：「右侧搜索栏里和新加入卡组的变了，卡组里的卡名没变化」
+    /// （新加入的 = 改名之后才 Get 的新副本；早就摆着的 = 改名前的老副本）。
+    ///
+    /// 这里逐张重取一份新副本替换。只动 cardData 引用，不动卡的位置 / 顺序，
+    /// 所以不会触发归桶重排（FromObjectDeckToCodedDeck 看的是位置）。
+    /// </summary>
+    public void refreshCardCopies()
+    {
+        if (deck == null)
+        {
+            return;
+        }
+        RefreshCopyList(deck.IMain);
+        RefreshCopyList(deck.IExtra);
+        RefreshCopyList(deck.ISide);
+    }
+
+    static void RefreshCopyList(IList<MonoCardInDeckManager> list)
+    {
+        if (list == null)
+        {
+            return;
+        }
+        for (int i = 0; i < list.Count; i++)
+        {
+            MonoCardInDeckManager mc = list[i];
+            if (mc == null || mc.cardData == null)
+            {
+                continue;
+            }
+            YGOSharp.Card fresh = YGOSharp.CardsManager.Get(mc.cardData.Id);
+            if (fresh != null)
+            {
+                mc.cardData = fresh;
+            }
+        }
+    }
 
     bool checkBanlistAvail(int cardid)
     {
@@ -1576,21 +1681,26 @@ public class DeckManager : ServantWithCardDescription
             }
         }
         camrem();
-        if (Input.mousePosition.x < Screen.width - 280)
+        // 验收用（qt_debug.on）：把「游戏确实收到了滚轮」与「视角没被它改到」两件事一起留下证据。
+        // ⛔ 为什么必须报 `wheelValue`：滚轮注入失败（鼠标事件没进 Input 层）时，
+        //   「视角没变」是**假绿** —— 它证明的是"没滚到"，不是"滚了也不动"。
+        //   两条一起看才有意义：收到滚轮 ∧ 角度恒定 ⇒ 真的取消了。
+        if (QuickTestTrace.Enabled && !Mathf.Approximately(Program.wheelValue, 0f))
         {
-            if (Input.mousePosition.x > 250)
+            if (Program.TimePassed() - lastWheelLogMs > 300)
             {
-                cameraAngle += Program.wheelValue * 1.2f;
-                if (cameraAngle < 0f)
-                {
-                    cameraAngle = 0f;
-                }
-                if (cameraAngle > 90f)
-                {
-                    cameraAngle = 90f;
-                }
+                lastWheelLogMs = Program.TimePassed();
+                QuickTestTrace.Log("deck", "wheel seen v=" + Program.wheelValue.ToString("F1")
+                    + " angle=" + cameraAngle.ToString("F2")
+                    + " dist=" + cameraDistance.ToString("F2")
+                    + " camRectX=" + Program.camera_game_main.rect.x.ToString("F4"));
             }
         }
+        // ⛔ 滚轮改视角那一段**已按用户 2026-10-03 口径整段删除**（原实现：
+        //   `cameraAngle += Program.wheelValue * 1.2f` 夹在 0~90）。
+        //   它让卡组板子随滚轮自己动（越滚越平），玩家没要求这个运动 ⇒ 相机角
+        //   现在只由 `show()` 那一句 `cameraAngle = 90` 定死，全程不动。
+        //   ⚠ 下面两行保留：它们只是把「角度」换算成相机位置，角度恒定时结果也恒定。
         cameraDistance = 29 - 3.1415926f / 180f * (cameraAngle - 60f) * 13f;
         Program.cameraPosition = new Vector3(0, cameraDistance * Mathf.Sin(3.1415926f / 180f * cameraAngle), -cameraDistance * Mathf.Cos(3.1415926f / 180f * cameraAngle));
         if (Program.TimePassed() - lastRefreshTime > 80)
@@ -1635,8 +1745,29 @@ public class DeckManager : ServantWithCardDescription
                 r -= 230 * gameObjectDetailedSearch.transform.localScale.x;
             }
         }
+        // 点链接弹出的检索窗也占右缘 ⇒ 与「分类」弹窗**同一套口径**把卡组板子顶开
+        //（用户 2026-10-03）：不减这一块的话，窗一开就整块压在板子上（牌被盖住）。
+        // 窗宽由窗自己报（<c>CardSearchWindow.BoardPushWidth</c>），这里不写死。
+        float push = CardSearchWindow.BoardPushWidth();
+        r -= push;
+        // 只在**让位量变了**时打一条：camrem 每帧都跑，无条件打会把日志冲爆。
+        if (QuickTestTrace.Enabled && !Mathf.Approximately(push, boardPushLast))
+        {
+            QuickTestTrace.Log("deck", "camrem push=" + Mathf.RoundToInt(push)
+                + " l=" + Mathf.RoundToInt(l) + " r=" + Mathf.RoundToInt(r)
+                + " center=" + Mathf.RoundToInt((l + r) / 2f)
+                + " detail=" + (detailShowed ? 1 : 0)
+                + " camRect=" + Program.camera_game_main.rect.x.ToString("F4"));
+        }
+        boardPushLast = push;
         Program.reMoveCam((l + r) / 2f);
     }
+
+    /// <summary>上一次 <see cref="camrem"/> 里检索窗让位了多少 px（只在 QuickTestTrace 下用来节流打日志）。</summary>
+    float boardPushLast = 0f;
+
+    /// <summary>上一次报「收到滚轮」的时间戳（毫秒，见 <see cref="preFrameFunction"/> 里那段验收日志）。</summary>
+    float lastWheelLogMs = -100000f;
 
     public override void ES_HoverOverGameObject(GameObject gameObject)
     {

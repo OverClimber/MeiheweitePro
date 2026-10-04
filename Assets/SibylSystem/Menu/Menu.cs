@@ -3674,6 +3674,21 @@ public class Menu : WindowServantSP
                                 Program.I().menu.RefreshRdUi();
                                 Program.I().menu.TraceAllIcons();
                                 Program.I().menu.TraceRdChip();
+                                // RD 专属的两条自检在这里补跑：它们要「当前池 = RD 池」才对得上，
+                                // 而 CardDescription 那次开机自检（go(2000, onAcceptanceProbe)）跑在
+                                // 冷启动的 OCG 下、被 IsRD 短路掉了。切到 RD 的这一刻才是它们该跑的时候。
+                                // 两个都在 qt_debug 关闭时立即返回（正式包零开销）。
+                                CardTextLinker.RdSelfTest();
+                                CardSearchWindow.RdQuerySelfTest();
+                                // 链接括号的截图探针：切完模式、池已是 RD 池这一刻才拍得到 RD 的（）括号
+                                // （开机自检那条链跑在冷启动的 OCG 下）。只在 log/linkunderline.probe 下干活。
+                                CardDescription.ProbeShowLinkCard();
+                                // 「连点同一处链接 = 关窗」的验收（只在 log/linktoggle.probe 下干活）。
+                                CardDescription.ProbeLinkToggle();
+                                // 检索窗「译」钮（批量换译名）的验收（只在 log/packtrans.probe 下干活）。
+                                CardSearchWindow.PackTransProbe();
+                                // 简介系列行链接 + 悬停提亮的验收（只在 log/serieslink.probe 下干活）。
+                                CardSearchWindow.SeriesLinkProbe();
                             }
                             break;
                         default:

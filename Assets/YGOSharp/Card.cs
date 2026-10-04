@@ -30,6 +30,14 @@ namespace YGOSharp
         public string Desc;
         public string[] Str;
 
+        /// <summary>
+        /// cdb 原文（未套翻译）。见 <see cref="CardNameTranslation"/>：
+        /// 显示用的 <see cref="Name"/>/<see cref="Desc"/> 永远是「原文 + 当前翻译表」算出来的，
+        /// 换翻译只要拿这两个字段重算一遍，不会污染数据源。
+        /// </summary>
+        public string nativeName;
+        public string nativeDesc;
+
         public string packShortNam = "";
         public string packFullName = "";
         public string reality = "";
@@ -60,6 +68,8 @@ namespace YGOSharp
             r.Category = Category;
             r.Name = Name;
             r.Desc = Desc;
+            r.nativeName = nativeName;
+            r.nativeDesc = nativeDesc;
             r.Str = new string[Str.Length];
             for (int ii = 0; ii < Str.Length; ii++)
             {
@@ -88,6 +98,8 @@ namespace YGOSharp
             r.Category = Category;
             r.Name = Name;
             r.Desc = Desc;
+            r.nativeName = nativeName;
+            r.nativeDesc = nativeDesc;
             r.Str = new string[Str.Length];
             for (int ii = 0; ii < Str.Length; ii++)
             {
@@ -137,6 +149,8 @@ namespace YGOSharp
             this.Category = reader.GetInt64(10);
             this.Name = reader.GetString(12);
             this.Desc = reader.GetString(13);
+            this.nativeName = this.Name;
+            this.nativeDesc = this.Desc;
             for (int ii = 0; ii < 0x10; ii++)
             {
                 this.Str[ii] = reader.GetString(14 + ii);

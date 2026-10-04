@@ -1219,7 +1219,14 @@ public class Program : MonoBehaviour
                     //   （2026-09-29 实测我猜成 `margin − 2.0` = 0.5，真值是 5.20 ⇒ 判据自己红自己）。
                     //   `panLim` = `TableauLayout.PanFieldLimit`：保证「场地远端 + 牌堆字样」离窗口沿
                     //   还剩一整个留白（用户 2026-09-29 报障那条）。
-                    + " panLim=" + TableauLayout.PanFieldLimit.ToString("F2"));
+                    + " panLim=" + TableauLayout.PanFieldLimit.ToString("F2")
+                    // 视口横移：⛔ 这一行紧跟在 tableauViewportFullScreen() 之后打，
+                    // 所以它就是**拾取射线看到的那一档**；帧尾 servant 段（camrem /
+                    // Ocgcore.preFrameFunction）会再写一次，那一档是**渲染用的**。
+                    // 两档不等 ⇒ 拾取与成像看的不是同一块屏幕（选牌偏移的根因）。
+                    // 俯视对局两档都应是 0.0000；卡组编辑器两档都应是 camrem 那档。
+                    + " rectX=" + camera_game_main.rect.x.ToString("F4")
+                    + " camViewport=" + CamViewportCenter.ToString("F1"));
                 if (topDownLike)
                 {
                     // 手牌/展示行的**行带拟合**：n=1..3 行各自的放大倍数 s 与每行 |z| 一次打全。
@@ -1447,6 +1454,17 @@ public class Program : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 验收用：某个 Servant 有没有被注册进「每帧派发」列表。右键（<c>ES_mouseDownRight</c>）
+    /// 这类事件**只**从这份列表走，没注册就静默失效 —— 屏幕上"什么都没发生"与
+    /// "根本没被调到"长得一模一样，所以这条读数必须能从脚本侧问出来（2026-10-04）。
+    /// </summary>
+    public static bool IsServantRegistered(Servant s)
+    {
+        Program p = I();
+        return p != null && p.servants != null && s != null && p.servants.Contains(s);
+    }
+
     public GameObject create(
         GameObject mod,
         Vector3 position = default(Vector3),
@@ -1556,14 +1574,82 @@ public class Program : MonoBehaviour
     //    }
     //}
 
+    /// <summary>
+    /// 3D 相机视口的**唯一真源**：上一次 <see cref="reMoveCam"/>（或
+    /// <see cref="CamViewportFull"/>）请求的**屏幕居中点**。
+    ///
+    /// <para><b>为什么要有这个字段</b>：视口横移是「谁需要它谁写 <c>camera.rect</c>」，
+    /// 而卡组编辑器那份 <c>DeckManager.camrem()</c> 是在 <c>Program.Update</c> 的
+    /// <b>servant 段</b>里跑的 —— 也就是**拾取射线之后、一帧渲染之前**。
+    /// 于是同一帧里 3D 相机有两个视口：
+    /// <list type="bullet">
+    /// <item>拾取（<c>Camera.main.ScreenPointToRay</c>，Program.Update 开头）看到的是
+    ///       <b>上一次 reMoveCam 之前</b>那一档（俯视下被 <c>tableauViewportFullScreen</c>
+    ///       拨回整屏 ⇒ <c>rect.x = 0</c>）；</item>
+    /// <item>渲染看到的是 <b>camrem 刚写的那一档</b>（<c>rect.x = (center−屏宽/2)/(屏宽/2)</c>）。</item>
+    /// </list>
+    /// 两者差 <c>center − 屏宽/2</c> 像素 ⇒ 玩家指着 A 拿到的却是右边那张卡。
+    /// 把「请求值」记下来，探针就能在**拾取那一帧**同时报出两档，一次说清谁偏了多少。</para>
+    ///
+    /// <para>⛔ 这是 <c>static</c> 字段，不进 Unity 的实例序列化 ⇒ 不影响任何已烘焙资源的
+    /// 字段布局（MEMORY 红线 13 那条只针对 MonoBehaviour 的实例字段）。</para>
+    ///
+    /// <para>⛔ <see cref="float.NaN"/> = 「要整屏」：俯视对局里 3D 盘面横跨整屏，
+    /// 不该按左右两个 2D 面板居中（见 <c>TableauLayout.tableauViewportFullScreen</c>）。</para>
+    /// </summary>
+    static float camViewportCenter = float.NaN;
+
+    /// <summary>
+    /// 当前请求的视口横移量（<c>camera.rect.x</c> 那一档）。
+    /// 屏宽未知时（初始化早期）按 0 处理。
+    /// </summary>
+    public static float CamViewportVal
+    {
+        get
+        {
+            if (float.IsNaN(camViewportCenter) || Screen.width <= 0)
+            {
+                return 0f;
+            }
+            return (camViewportCenter - (float)Screen.width / 2f) / ((float)Screen.width / 2f);
+        }
+    }
+
+    /// <summary>上一次请求的视口居中点；<see cref="float.NaN"/> = 整屏。</summary>
+    public static float CamViewportCenter { get { return camViewportCenter; } }
+
+    /// <summary>
+    /// 把「当前请求的视口」写进三台 3D 相机。
+    /// <see cref="reMoveCam"/> 与 <see cref="CamViewportFull"/> 共用它，避免两处各写一遍公式。
+    /// </summary>
+    static void applyCamViewport()
+    {
+        Rect r = new Rect(CamViewportVal, 0, 1, 1);
+        if (camera_game_main != null)
+        {
+            camera_game_main.rect = r;
+        }
+        if (camera_container_3d != null)
+        {
+            camera_container_3d.rect = r;
+        }
+        if (camera_main_3d != null)
+        {
+            camera_main_3d.rect = r;
+        }
+    }
+
+    /// <summary>请求「3D 视口铺满整屏」（俯视对局的取景口径）。</summary>
+    public static void CamViewportFull()
+    {
+        camViewportCenter = float.NaN;
+        applyCamViewport();
+    }
+
     public static void reMoveCam(float xINscreen)
     {
-        float all = (float)Screen.width / 2f;
-        float it = xINscreen - (float)Screen.width / 2f;
-        float val = it / all;
-        camera_game_main.rect = new Rect(val, 0, 1, 1);
-        camera_container_3d.rect = camera_game_main.rect;
-        camera_main_3d.rect = camera_game_main.rect;
+        camViewportCenter = xINscreen;
+        applyCamViewport();
     }
 
     public static void ShiftUIenabled(GameObject ui, bool enabled)
@@ -1655,6 +1741,7 @@ public class Program : MonoBehaviour
     public selectReplay selectReplay;
     public Room room;
     public CardDescription cardDescription;
+    public CardSearchWindow cardSearch;
     public DeckManager deckManager;
     public Ocgcore ocgcore;
     public SelectServer selectServer;
@@ -1676,6 +1763,17 @@ public class Program : MonoBehaviour
         room = new Room();
         servants.Add(room);
         cardDescription = new CardDescription();
+        // ⛔⛔ 必须把说明面板注册进 servants（2026-10-04 修）：右键（ES_mouseDownRight）是
+        //   由 <see cref="Servant.Update"/> **每帧派发**的，不在这个列表里就**永远调不到** ——
+        //   表现就是"说明面板能点链接、能悬停提亮，偏偏右键没反应"（用户实测）。
+        //   左键/悬停走的是 NGUI 事件与挂在 label 上的 MonoBehaviour
+        //   （CardLinkClick / CardLinkHover），不经过这里，所以只有右键会哑掉。
+        //   副作用审查：CardDescription 只重写了 ES_mouseDownRight（其余 ES_* 全是基类空实现），
+        //   所以多这一份 Update 只会多派发右键；fixScreenProblem 也会在改设置时被调到一次 ——
+        //   正是它该被调到的时候（applyShow/HideArrangement 本身幂等）。
+        servants.Add(cardDescription);
+        cardSearch = new CardSearchWindow();
+        servants.Add(cardSearch);
         deckManager = new DeckManager();
         servants.Add(deckManager);
         ocgcore = new Ocgcore();
@@ -1872,6 +1970,83 @@ public class Program : MonoBehaviour
             + " scr=" + Screen.width + "x" + Screen.height);
     }
 
+    /// <summary>
+    /// 验收「选牌偏移」用的**帧尾**探针（<c>log/deckpick.probe</c>）：在同一帧里把
+    /// 「拾取用的视口」与「渲染用的视口」各打一次**同一条**射线，把两张结果并排报出来。
+    ///
+    /// <para><b>为什么必须同帧两次</b>（2026-10-03 用户报「鼠标选中的卡和左侧显示的卡
+    /// 不一致」时用的就是这一条）：<c>pickCode</c> 是这一帧真的用的那次拾取，
+    /// <c>drawCode</c> 是用**渲染那一档**视口重打同一条射线 ——
+    /// 它才对应「玩家眼睛看到的那个位置」。两个 code 不同 ⇒ 拾取与成像看的不是同一块屏幕。</para>
+    ///
+    /// <para>⛔ <b>两个数必须分别从帧的两头采</b>，这是本探针的全部难点：
+    /// <c>rectX</c>（拾取那档）只能在 <c>Program.Update</c> 的拾取处采，
+    /// <c>renderX</c>（渲染那档）只能在 <b>servant 段之后</b>采 ——
+    /// 因为 <c>DeckManager.camrem()</c> 恰恰是在那之后才把视口写掉的。
+    /// 两个数都放在拾取处读，第二个永远是 0，量不到任何东西（第一版就这么白跑过一轮）。</para>
+    ///
+    /// <para>⚠ 只在「这一帧真的拾取到卡组板子上的卡」时报，且按光标位移节流
+    /// （静止时一帧一条会把日志冲爆，而静止时的读数又没有新信息）。</para>
+    /// </summary>
+    void ProbeDeckPickTail()
+    {
+        if (deckPickCode == 0)
+        {
+            return;
+        }
+        Vector3 m = deckPickMouse;
+        if (Mathf.Abs(m.x - deckPickLast.x) < 0.5f && Mathf.Abs(m.y - deckPickLast.y) < 0.5f)
+        {
+            return;
+        }
+        deckPickLast = m;
+        Camera cam = camera_game_main;
+        // 此刻（servant 段之后）相机上的视口，就是**这一帧渲染**用的那一档。
+        float renderX = cam.rect.x;
+        int drawCode = 0;
+        try
+        {
+            if (!Mathf.Approximately(deckPickViewportX, renderX))
+            {
+                Ray alt = cam.ScreenPointToRay(m);
+                RaycastHit altHit;
+                if (Physics.Raycast(alt, out altHit, (float)1000, rayFilter))
+                {
+                    MonoCardInDeckManager altCard = altHit.collider.GetComponent<MonoCardInDeckManager>();
+                    drawCode = altCard != null ? altCard.cardData.Id : -1;
+                }
+                else
+                {
+                    drawCode = -2;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            drawCode = -3;
+            QuickTestTrace.Log("pick", "altray err " + e.Message);
+        }
+        QuickTestTrace.Log("pick", "mouse=(" + Mathf.RoundToInt(m.x) + ","
+            + Mathf.RoundToInt(m.y) + ")"
+            + " pickCode=" + deckPickCode
+            + " drawCode=" + drawCode
+            + " rectX=" + deckPickViewportX.ToString("F4")
+            + " renderX=" + renderX.ToString("F4")
+            + " topDown=" + (topDownLike ? 1 : 0)
+            + " scr=" + Screen.width + "x" + Screen.height);
+    }
+
+    /// <summary>拾取那一帧的视口横移（<c>Program.Update</c> 拾取处采样）。</summary>
+    static float deckPickViewportX = 0f;
+
+    /// <summary>拾取那一帧真正命中的卡（0 = 没命中卡组板子上的卡 ⇒ 本帧不报）。</summary>
+    static int deckPickCode = 0;
+
+    /// <summary>拾取那一帧的光标位置（<c>Input.mousePosition</c>，左下原点）。</summary>
+    static Vector3 deckPickMouse;
+
+    static Vector3 deckPickLast = new Vector3(-9999f, -9999f, 0f);
+
     /// <summary>把命中对象写成「父/子」路径，一眼看出是工具条上哪个按钮。</summary>
     static string ProbePathOf(GameObject go)
     {
@@ -1944,6 +2119,16 @@ public class Program : MonoBehaviour
             }
         }
         ProbeMouse(hoverobject);
+        if (QuickTestTrace.SwitchOn("deckpick.probe"))
+        {
+            // 拾取这一帧的「视口」与「命中谁」在这里采样 —— 帧尾那份探针要拿它们做对照
+            // （见 ProbeDeckPickTail 的头注：两个数必须分别从帧的两头采）。
+            deckPickViewportX = camera_game_main != null ? camera_game_main.rect.x : 0f;
+            MonoCardInDeckManager pickCard = pointedGameObject != null
+                ? pointedGameObject.GetComponent<MonoCardInDeckManager>() : null;
+            deckPickCode = pickCard != null ? pickCard.cardData.Id : 0;
+            deckPickMouse = Input.mousePosition;
+        }
         InputGetMouseButtonDown_0 = Input.GetMouseButtonDown(0);
         InputGetMouseButtonUp_0 = Input.GetMouseButtonUp(0);
         InputGetMouseButtonDown_1 = Input.GetMouseButtonDown(1);
@@ -1963,6 +2148,12 @@ public class Program : MonoBehaviour
             aiRoom.WatchdogTick();
         }
         Heartbeat("update-end");
+        // 验收「选牌偏移」的帧尾探针：必须排在 servant 段**之后** ——
+        // DeckManager.camrem() 正是在那一段里把 3D 视口写掉的，此刻读到的就是渲染用的那一档。
+        if (QuickTestTrace.SwitchOn("deckpick.probe"))
+        {
+            ProbeDeckPickTail();
+        }
         delayedTask remove = null;
         while (true)
         {

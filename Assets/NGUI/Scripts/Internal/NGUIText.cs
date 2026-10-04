@@ -1,4 +1,4 @@
-//----------------------------------------------
+﻿//----------------------------------------------
 //            NGUI: Next-Gen UI kit
 // Copyright © 2011-2015 Tasharen Entertainment
 //----------------------------------------------
@@ -498,6 +498,8 @@ static public class NGUIText
 
 				case "[u]":
 				underline = true;
+				// 登记「下一个算出来的颜色要留给下划线」（只登记，取值在 Print 里）
+				if (colors != null) mUnderlineArmed = true;
 				index += 3;
 				return true;
 
@@ -533,6 +535,8 @@ static public class NGUIText
 
 				case "[/u]":
 				underline = false;
+				mUnderlineColorSet = false;
+				mUnderlineArmed = false;
 				index += 4;
 				return true;
 
@@ -1346,6 +1350,24 @@ static public class NGUIText
 	}
 
 	static Color32 s_c0, s_c1;
+	
+	// 下划线**专用**颜色（2026-10-03 加，为「链接括号一起画下划线、但字本身不上色」）。
+	// 背景：NGUI 的下划线逐字画，颜色取**当前字符**的 `uc` ⇒ 字一离开 `[色]` 段，
+	//   脚下的线也跟着掉色。需求要的是「线连成一条同色的，字可以不跟着上色」，
+	//   两件事得拆开 ⇒ 线单独记一个颜色。
+	// 取值时机：`[u]` 被解析的那一刻（`ParseSymbol` 里只**登记** `mUnderlineArmed`），
+	//   真正的颜色要等 `Print` 里算出 `tint × 栈顶色 × alpha` 之后才有 ⇒ 在那儿落袋。
+	// ⛔ 只有 `colors != null`（= 正在 Print 且带颜色栈）时才登记，WrapText 之类
+	//   传 null 的调用不会污染它。
+	static Color mUnderlineColor = Color.white;
+	static bool mUnderlineColorSet = false;
+	static bool mUnderlineArmed = false;
+
+	/// <summary>Print 调用序号（诊断用，见 <see cref="UnderlineDiag"/>）。</summary>
+	static int mPrintSeq = 0;
+
+	/// <summary>下划线诊断（underline_diag.probe）：把每个 dash quad 的取色过程打进 [link] 日志。</summary>
+	static public bool UnderlineDiag;
 
 	/// <summary>
 	/// Print the specified text into the buffers.
@@ -1357,10 +1379,14 @@ static public class NGUIText
 
 		int indexOffset = verts.size;
 		Prepare(text);
+		if (UnderlineDiag) QuickTestTrace.Log("link", "uprint n=" + (++mPrintSeq)
+			+ " len=" + text.Length + " cols=" + (cols != null) + " enc=" + encoding);
 
 		// Start with the white tint
 		mColors.Add(Color.white);
 		mAlpha = 1f;
+		mUnderlineColorSet = false;
+		mUnderlineArmed = false;
 
 		int ch = 0, prev = 0;
 		float x = 0f, y = 0f, maxX = 0f;
@@ -1369,6 +1395,8 @@ static public class NGUIText
 		Color gb = tint * gradientBottom;
 		Color gt = tint * gradientTop;
 		Color32 uc = tint;
+		Color32 ucl = tint;          // 下划线专用色（32 位版，进顶点色时用）
+		bool glyphIsDash = false;    // 当前这个字是下划线的"空格替身"（见下方 IsSpace 分支）
 		int textLength = text.Length;
 
 		Rect uvRect = new Rect();
@@ -1401,8 +1429,9 @@ static public class NGUIText
 		for (int i = 0; i < textLength; ++i)
 		{
 			ch = text[i];
-
+			
 			prevX = x;
+			glyphIsDash = false;
 
 			// New line character -- skip to the next line
 			if (ch == '\n')
@@ -1445,6 +1474,15 @@ static public class NGUIText
 					fc.a *= mAlpha;
 				}
 				uc = fc;
+
+				// `[u]` 登记过 ⇒ 这一刻算出来的色就是「这一截下划线的颜色」（见字段注释）。
+				if (mUnderlineArmed)
+				{
+					mUnderlineColor = fc;
+					mUnderlineColorSet = true;
+					mUnderlineArmed = false;
+					ucl = uc;
+				}
 
 				for (int b = 0, bmax = mColors.size - 2; b < bmax; ++b)
 					fc.a *= mColors[b].a;
@@ -1585,7 +1623,8 @@ static public class NGUIText
 				{
 					if (underline)
 					{
-						ch = '_';
+					ch = '_';
+					glyphIsDash = true;
 					}
 					else if (strikethrough)
 					{
@@ -1639,8 +1678,13 @@ static public class NGUIText
 							min /= sizePD;
 							max /= sizePD;
 
-							s_c0 = Color.Lerp(gb, gt, min);
-							s_c1 = Color.Lerp(gb, gt, max);
+							// 空格替身（见下方 IsSpace 分支）撑出来的那一小段线同样要吃登记色
+							// （理由与 dash 那段一样，注释在 dash 的渐变分支里）。
+							Color gb2 = (glyphIsDash && mUnderlineColorSet) ? gradientBottom * mUnderlineColor : gb;
+							Color gt2 = (glyphIsDash && mUnderlineColorSet) ? gradientTop * mUnderlineColor : gt;
+
+							s_c0 = Color.Lerp(gb2, gt2, min);
+							s_c1 = Color.Lerp(gb2, gt2, max);
 
 							for (int j = 0, jmax = (bold ? 4 : 1); j < jmax; ++j)
 							{
@@ -1652,8 +1696,9 @@ static public class NGUIText
 						}
 						else
 						{
+							Color32 gc = (glyphIsDash && mUnderlineColorSet) ? ucl : uc;
 							for (int j = 0, jmax = (bold ? 16 : 4); j < jmax; ++j)
-								cols.Add(uc);
+								cols.Add(gc);
 						}
 					}
 					else
@@ -1722,7 +1767,14 @@ static public class NGUIText
 				if (underline || strikethrough)
 				{
 					GlyphInfo dash = GetGlyph(strikethrough ? '-' : '_', prev);
-					if (dash == null) continue;
+					if (dash == null)
+					{
+						if (UnderlineDiag) QuickTestTrace.Log("link", "udiagdash ch=" + ch + " dash=NULL");
+						continue;
+					}
+					if (UnderlineDiag) QuickTestTrace.Log("link", "udiagdash ch=" + ch
+						+ " set=" + mUnderlineColorSet + " ucl=" + ucl + " uc=" + uc
+						+ " v0y=" + Mathf.RoundToInt(-y + dash.v0.y) + " x=" + Mathf.RoundToInt(prevX) + ".." + Mathf.RoundToInt(x));
 
 					if (uvs != null)
 					{
@@ -1785,8 +1837,16 @@ static public class NGUIText
 						min /= sizePD;
 						max /= sizePD;
 
-						s_c0 = Color.Lerp(gb, gt, min);
-						s_c1 = Color.Lerp(gb, gt, max);
+						// ⛔ 登记过下划线色 ⇒ 这条线**不许**跟着"当前字色"（gb/gt）走。
+						//   描述 label 是开渐变的，而 gb/gt 拿的是**当前** fc 算的；
+						//   CardTextLinker.LinkBracketed 故意把括号留在正文色上 ⇒
+						//   括号那一小段线就掉回正文色（用户 2026-10-03 报的就是这个）。
+						//   这里把两端换成登记色，再走同一条明暗插值 ⇒ 色相始终是链接色。
+						Color db = mUnderlineColorSet ? gradientBottom * mUnderlineColor : gb;
+						Color dt = mUnderlineColorSet ? gradientTop * mUnderlineColor : gt;
+
+						s_c0 = Color.Lerp(db, dt, min);
+						s_c1 = Color.Lerp(db, dt, max);
 
 						for (int j = 0, jmax = (bold ? 4 : 1); j < jmax; ++j)
 						{
@@ -1798,8 +1858,12 @@ static public class NGUIText
 					}
 					else
 					{
+						Color32 lc = mUnderlineColorSet ? ucl : uc;
+						if (UnderlineDiag) QuickTestTrace.Log("link", "ulcolor n=" + mPrintSeq
+							+ " ch=" + ch + " lc=" + lc + " set=" + mUnderlineColorSet
+							+ " ucl=" + ucl + " uc=" + uc);
 						for (int j = 0, jmax = (bold ? 16 : 4); j < jmax; ++j)
-							cols.Add(uc);
+							cols.Add(lc);
 					}
 				}
 			}

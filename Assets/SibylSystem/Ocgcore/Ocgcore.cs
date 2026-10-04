@@ -3781,6 +3781,30 @@ public class Ocgcore : ServantWithCardDescription
 
     public GameMessage currentMessage = GameMessage.Waiting;
 
+    /// <summary>
+    /// **当前回合归谁**（0 = 我方 / 1 = 对方）。口径与 <c>gameInfo.setExcited(player)</c> 完全一致
+    /// —— 那边就是把 <c>localPlayer()</c> 映射后的 player 拿去点亮谁的时间条。
+    ///
+    /// <para><b>谁写它</b>：<c>GameMessage.NewTurn</c> 的两处（logicalize 的记账分支与
+    /// practicalize 的表现分支）各写一次，同一个值，幂等。写在那两处而不是别处，是因为
+    /// 那是 core 唯一宣布「换回合了」的地方。</para>
+    ///
+    /// <para><b>为什么需要它</b>（2026-10-03）：AI 对局看门狗原先只看「多久没有入站包」，
+    /// 于是<em>玩家自己</em>想事情超过 2 分钟也会被判成「电脑对手卡死」。
+    /// 而「轮到谁」这件事客户端本来就知道，不必去猜包。</para>
+    ///
+    /// <para>⛔ 初值 <c>-1</c> = 还没收到第一个 NewTurn（开局洗牌/发牌那几秒）。
+    /// 那段时间<em>任何一方</em>都可能还没动作，所以一律按「不判静默」处理 ——
+    /// 宁可少报一次，也不要在开局就误报。</para>
+    /// </summary>
+    public int turnOwner = -1;
+
+    /// <summary>
+    /// 现在是不是<em>轮到电脑</em>行动。判据只认 <c>turnOwner == 1</c>：
+    /// <c>-1</c>（还没开局）与 <c>0</c>（轮到我方）都算「不是」。
+    /// </summary>
+    public bool isOpponentTurn { get { return turnOwner == 1; } }
+
     public bool paused = false;
 
     float lastSize = 0;
@@ -6341,6 +6365,9 @@ public class Ocgcore : ServantWithCardDescription
                 gameField.currentPhase = GameField.ph.dp;
                 //  keys.Insert(0, currentMessageIndex);
                 player = localPlayer(r.ReadByte());
+                // 🔑 记下回合归属：AI 对局看门狗据此判断「现在该不该轮到电脑动」
+                //   （见 turnOwner 的头注）。与下面 setExcited 用的是同一个 player。
+                turnOwner = player;
                 if (player == 0)
                 {
                     ES_turnString = InterString.Get("我方的");
@@ -8866,6 +8893,18 @@ public class Ocgcore : ServantWithCardDescription
             case GameMessage.NewTurn:
                 removeSelectedAnimations();
                 player = localPlayer(r.ReadByte());
+                turnOwner = player;   // 与 logicalize 那处同源；AI 对局看门狗读它
+                // 排查用（qt_debug.on）：把每次换回合连同「看门狗据此判的那一档」一起落盘。
+                // 验收脚本靠它证明「静默计时只在 turn=1 那一档累计」——
+                // 光看 [wd] 那条提示，判不出它是在谁的回合上弹的。
+                if (QuickTestTrace.Enabled)
+                {
+                    QuickTestTrace.Log("turn", "owner=" + turnOwner
+                        + " (" + (turnOwner == 0 ? "我方" : turnOwner == 1 ? "对方" : "未开局") + ")"
+                        + " turns=" + turns
+                        + " msg=" + currentMessage
+                        + " wdCounts=" + AIRoom.IsAiSessionLive);
+                }
                 if (condition != Condition.duel)
                 {
                     gameInfo.setTimeStill(player);
@@ -14289,6 +14328,7 @@ public class Ocgcore : ServantWithCardDescription
         gameInfo.swaped = false;
         keys.Clear();
         currentMessageIndex = -1;
+        turnOwner = -1;   // 整场清掉 ⇒ 回合归属也归零（见 turnOwner 的头注）
         result = duelResult.disLink;
         theWorldIndex = 0;
         gameInfo.setTimeStill(0);

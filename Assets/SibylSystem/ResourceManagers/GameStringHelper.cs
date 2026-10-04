@@ -668,7 +668,9 @@ public class GameStringHelper
             {
                 re += "\n";
                 re += xilie;
-                re += getSetName(data.Setcode);
+                // 需求 3：系列行走**显示版**（系列译名改了这里跟着变）；
+                // 检索用的 getSetName（原生口径）保持不动。
+                re += getSetNameDisplay(data.Setcode);
             }
             re += "[-]";
         }
@@ -829,4 +831,209 @@ public class GameStringHelper
         }
         return String.Join("|", returnValue.ToArray());
     }
+
+    /// <summary>
+    /// **简介系列行的显示版**（需求 3）：与 <see cref="getSetName"/> 同一张表、同一段位拆法，
+    /// 唯一差别是每段先取原生名、再过一遍系列译名（<c>CardNameTranslation.FieldNameDisplay</c>
+    /// —— 没手改就原样）。搜索用的 <see cref="getSetName"/> **一个字都不动**：
+    /// <c>Card.strSetName</c> 保持原生口径，免得把检索语义搅了。
+    /// </summary>
+    public static string getSetNameDisplay(ulong Setcode)
+    {
+        var setcodes = new int[4];
+        for(var j = 0; j < 4; j++)
+        {
+            setcodes[j] = (int)((Setcode >> j * 16) & 0xffff);
+        }
+        var returnValue = new List<string>();
+        for (var i = 0; i < GameStringManager.xilies.Count; i++)
+        {
+            var currentHash = GameStringManager.xilies[i].hashCode;
+            for(var j = 0; j < 4; j++)
+            {
+                if (currentHash == setcodes[j])
+                {
+                    var setArray = GameStringManager.xilies[i].content.Split('\t');
+                    returnValue.Add(YGOSharp.CardNameTranslation.FieldNameDisplay(setArray[0]));
+                }
+            }
+        }
+        return String.Join("|", returnValue.ToArray());
+    }
+
+    /// <summary>一个系列的两副面孔：<c>native</c> = !setname 表里的原名（检索口径），
+    /// <c>display</c> = 过了译名表的显示版（画在简介里那副）。</summary>
+    public struct SetNamePair
+    {
+        public string native;
+        public string display;
+        /// <summary>这一系列在 !setname 表里的 hashCode（简介系列行链接用它精确检索）。</summary>
+        public int hash;
+    }
+
+    /// <summary>
+    /// 这张卡挂的**全部系列**，原名 + 显示名 + 表内 hashCode **成对**给出。
+    ///
+    /// <para><b>为什么要成对</b>：简介系列行（<see cref="getSmall"/> 末尾「系列：A|B」）
+    /// 要做成可点链接（用户 2026-10-04），而点下去要的是**精确按系列检索** ——
+    /// 靠显示名全文检索会把"卡文里提到它"的一堆无关卡也倒出来。所以链接 payload 里
+    /// 直接带表内 hash，检索端按 <c>Setcode</c> 的 16 位槽逐位比对，一个字都不用猜。</para>
+    ///
+    /// <para>迭代口径与 <see cref="getSetNameDisplay"/> **逐字一致**（同一张表、同一段位拆法、
+    /// 同一个顺序）⇒ 按下标与显示行一一对齐，不会错位。</para>
+    /// </summary>
+    public static List<SetNamePair> getSetNamePairs(ulong Setcode)
+    {
+        var setcodes = new int[4];
+        for (var j = 0; j < 4; j++)
+        {
+            setcodes[j] = (int)((Setcode >> j * 16) & 0xffff);
+        }
+        var returnValue = new List<SetNamePair>();
+        for (var i = 0; i < GameStringManager.xilies.Count; i++)
+        {
+            var currentHash = GameStringManager.xilies[i].hashCode;
+            for (var j = 0; j < 4; j++)
+            {
+                if (currentHash == setcodes[j])
+                {
+                    var setArray = GameStringManager.xilies[i].content.Split('\t');
+                    SetNamePair p = new SetNamePair();
+                    p.native = setArray[0];
+                    p.display = YGOSharp.CardNameTranslation.FieldNameDisplay(setArray[0]);
+                    p.hash = currentHash;
+                    returnValue.Add(p);
+                }
+            }
+        }
+        return returnValue;
+    }
+
+    /// <summary>
+    /// 这张卡的**原生系列名清单**（去重、保序；不带 <c>!setname</c> 里 Tab 后面的副名）。
+    /// 给「译」菜单的「本卡系列改名」选择器用 —— 玩家从真实存在的系列里挑，不用手输原名。
+    /// </summary>
+    public static List<string> getSetNames(ulong Setcode)
+    {
+        var setcodes = new int[4];
+        for(var j = 0; j < 4; j++)
+        {
+            setcodes[j] = (int)((Setcode >> j * 16) & 0xffff);
+        }
+        var returnValue = new List<string>();
+        for (var i = 0; i < GameStringManager.xilies.Count; i++)
+        {
+            var currentHash = GameStringManager.xilies[i].hashCode;
+            for(var j = 0; j < 4; j++)
+            {
+                if (currentHash == setcodes[j])
+                {
+                    var setArray = GameStringManager.xilies[i].content.Split('\t');
+                    var setString = setArray[0].Trim();
+                    if (setString.Length > 0 && !returnValue.Contains(setString))
+                    {
+                        returnValue.Add(setString);
+                    }
+                }
+            }
+        }
+        return returnValue;
+    }
+
+    // ============================ 卡文写法 → 位序 的反查（RD 简介链接/条件检索共用） ============================
+    //
+    // RD 卡文的括号里写的是**卡面上的字**（「银河族」「地属性」），而检索要比的是**位掩码**。
+    // 两边必须有且只有一份换算：卡文解析端（RdCondition）与将来的任何筛选器都调这里。
+    // ⛔ 别照着 `族` 尾巴自己算下标：`raceName` 给的是「战士」而卡文写「战士族」，
+    //   而且 RD 那 6 个新种族里有一个连用字都不一样（见下）。
+
+    /// <summary>
+    /// 卡文里的种族写法（`银河族` / `幻想魔族`）→ 位序；认不出来返回 -1。
+    /// 传进来的可以带 `族` 也可以不带（`raceName` 给的就是不带的那种）。
+    /// </summary>
+    public static int raceBitOf(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return -1;
+        }
+        string n = name.Trim();
+        if (n.EndsWith("族", StringComparison.Ordinal))
+        {
+            n = n.Substring(0, n.Length - 1);
+        }
+        if (n.Length == 0)
+        {
+            return -1;
+        }
+        // 先按卡面文案等值比（raceName 已经是「位序 → 文案」的唯一定义）。
+        for (int i = 0; i < RaceCount; i++)
+        {
+            string show = raceName(i);
+            if (show.Length > 0 && show == n)
+            {
+                return i;
+            }
+        }
+        // 卡文与卡面用字不一致的那个（实测 11 处）：
+        //   卡文「欧米伽念动力族」，而 RdRaceNames 给的是「欧米茄念动力」（伽/茄）。
+        //   等值比较找不着，只能单列 —— 别把 RdRaceNames 改成「伽」，
+        //   那个数组是卡面显示口径，改了卡面上的种族名也跟着变。
+        if (n == "欧米伽念动力")
+        {
+            return RaceBitCountOCG + 2;   // bit28，见 RdRaceNames 的位序表
+        }
+        return -1;
+    }
+
+    /// <summary>卡文里的属性写法（`地属性` / `光属性`）→ 位序；认不出来返回 -1。</summary>
+    public static int attributeBitOf(string name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return -1;
+        }
+        string n = name.Trim();
+        if (n.EndsWith("属性", StringComparison.Ordinal))
+        {
+            n = n.Substring(0, n.Length - 2);
+        }
+        if (n.Length == 0)
+        {
+            return -1;
+        }
+        // 属性文案表在 strings.conf 的 1010..1016（地 水 炎 风 光 暗 神），
+        // 与 attribute() 用的是同一批 —— 那边印卡面，这边反查，口径自然一致。
+        for (int i = 0; i < 7; i++)
+        {
+            string show = GameStringManager.get_unsafe(1010 + i);
+            if (!string.IsNullOrEmpty(show) && show == n)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// RD「传说卡」在卡文里的字面标记 —— 卡文首行那颗稀有度角标
+    /// （实测形如 <c>RD/ECG1-JP002\t&lt;传说卡&gt;</c>），也就是界面上看得见的那三个字。
+    /// </summary>
+    public const string RdLegendWord = "传说卡";
+
+    /// <summary>
+    /// RD 传说卡判据：**卡文里出现「传说卡」三个字**。
+    ///
+    /// ⛔ 不能拿类型位判 —— 老注释写着「bit3 (0x8) = 传说卡（121 张）」，实测是错的：
+    ///   三张卡表 3484 张里带 `&lt;传说卡&gt;` 的有 121 张（rd_standard），
+    ///   而 type 真的带了 bit3 的**只有 2 张**（`0x4000a`：魔导师之力 / 团结之力 这两张
+    ///   装备魔法）。按位掩码筛传说卡会漏掉 119 张。所以这里认卡文。
+    /// </summary>
+    public static bool isLegendCard(YGOSharp.Card card)
+    {
+        return card != null
+            && !string.IsNullOrEmpty(card.Desc)
+            && card.Desc.IndexOf(RdLegendWord, StringComparison.Ordinal) >= 0;
+    }
 }
+

@@ -354,6 +354,29 @@ public static class TableauLayout
     /// 正俯视下 3D 内容横跨整屏，偏 80px 就是「过度偏左」。
     /// ⛔ 只改 <c>rect</c>（投影窗口），**不改相机位置与朝向** ⇒ 不动 v3 的取景几何，
     /// 也**不改卡的大小**（视口平移是屏幕空间的）。关态一个数都不动。
+    ///
+    /// <para>⛔⛔ <b>2026-10-03：闸门补上「对局视角正在显示」这一条</b>
+    /// （用户报「卡组编辑器里鼠标选中的卡和左侧显示的卡不一致」）。
+    /// 原来的闸门只有 <c>topDownLike</c>，于是它连<b>卡组编辑器</b>那份
+    /// <c>DeckManager.camrem()</c> 也一起拨了 —— 而这两份意图在帧里的时机不同：</para>
+    /// <list type="bullet">
+    /// <item>本函数由 <c>Program.fixALLcamerasPreFrame</c> 调，跑在 <c>Program.Update</c>
+    ///         <b>开头</b>（也就是 3D 拾取射线<b>之前</b>）；</item>
+    /// <item><c>DeckManager.camrem()</c> 由 servant 段调，跑在同一帧的<b>末尾</b>
+    ///         （拾取射线之后、一帧渲染之前）。</item>
+    /// </list>
+    /// <para>⇒ 同一帧里 3D 相机先后被写了两档：<b>拾取</b>看到本函数写的整屏（<c>rect.x = 0</c>），
+    /// <b>渲染</b>看到 <c>camrem</c> 写的横移档。两者差 <c>center − 屏宽/2</c> 像素
+    /// （本机 94px ≈ 一张卡宽）⇒ 玩家指着 A、拿到的是右边那张 B，
+    /// 而左侧说明面板显示的正是这个 B。</para>
+    /// <para>⛔ 顺带解释了用户观察到的「打开简介跳出来的检索窗就正常了」：那扇窗一开，
+    /// <c>camrem</c> 的 <c>center</c> 从 1054 变成 939（离屏中 960 只差 21px），
+    /// 两档之差从 94px 缩到 21px —— <b>不是修好了，是偏移变小了</b>。</para>
+    /// <para>✅ 新判据 = 「3D 内容是不是横跨整屏」：只有<b>对局</b>的盘面是。
+    /// 卡组编辑器的板子居中在左侧简介面板与右侧检索面板之间，那套 2D 面板居中口径
+    /// 本来就是对的（60° 模式一直如此），俯视下没理由取消 ——
+    /// 与 <c>Ocgcore.preFrameFunction</c> 里
+    /// <c>reMoveCam(topDownLike ? 屏宽/2 : getScreenCenter())</c> 是同一个口径。</para>
     /// </summary>
     public static void tableauViewportFullScreen()
     {
@@ -361,19 +384,13 @@ public static class TableauLayout
         {
             return;
         }
-        Rect full = new Rect(0f, 0f, 1f, 1f);
-        if (Program.camera_game_main != null && Program.camera_game_main.rect != full)
+        // 对局之外（卡组编辑器 / 选卡组 / 房间…）：那份「让板子让开 2D 面板」的横移要保留。
+        Program p = Program.I();
+        if (p == null || p.ocgcore == null || !p.ocgcore.isShowed)
         {
-            Program.camera_game_main.rect = full;
+            return;
         }
-        if (Program.camera_container_3d != null && Program.camera_container_3d.rect != full)
-        {
-            Program.camera_container_3d.rect = full;
-        }
-        if (Program.camera_main_3d != null && Program.camera_main_3d.rect != full)
-        {
-            Program.camera_main_3d.rect = full;
-        }
+        Program.CamViewportFull();
     }
 
     /// <summary>

@@ -149,8 +149,46 @@ public class gameInfo : MonoBehaviour
 
     public bool swaped = false;
 
+    // ── 右缘让位（用户 2026-10-02 第二轮）─────────────────────────────────
+    // 战斗里「点简介链接弹出的检索窗」占住右缘时，右缘这一列（血条×2 / 按钮列 / 消息列表）
+    // 要整体**被顶开**、弹到检索窗左边。检索窗 show/hide 时由 CardSearchWindow 写目标值
+    // （= 检索窗宽，0 = 没人占）；这里每帧朝目标缓动 —— Update 本来就每帧重写这些
+    // localPosition，所以让位必须做进同一处，否则一帧就被写回原位。
+    //
+    // ⛔⛔两个字段都**必须 private**：本类已序列化进包（场景/prefab 里的 MonoBehaviour），
+    //   包内数据按**旧类布局**写成；加一个 public 字段，运行期反序列化按**新布局**读就会
+    //   越过数据末尾 ⇒ 「sharedassets0.assets is corrupted! [Position out of bounds!]」
+    //   ⇒ 开机即崩（2026-10-02 实证三连崩，二分定位到本处）。私有字段不进序列化布局，
+    //   随便加；对外用 SetRightShift()/GetRightShift() 这对访问器。
+    /// <summary>右缘要让开的像素目标（= 占住右缘的检索窗宽；0 = 没人占）。</summary>
+    float rightShiftTarget = 0f;
+
+    /// <summary>当前已滑到的让位量（朝 rightShiftTarget 缓动，做出「被顶开」的动感）。</summary>
+    float rightShiftCur = 0f;
+
+    /// <summary>检索窗占住右缘时上报让位量（px）；收窗时传 0。幂等。</summary>
+    public void SetRightShift(float px)
+    {
+        rightShiftTarget = px < 0f ? 0f : px;
+    }
+
+    /// <summary>验收用：读当前让位目标。</summary>
+    public float GetRightShiftTarget()
+    {
+        return rightShiftTarget;
+    }
+
     void Update()
     {
+        if (rightShiftCur != rightShiftTarget)
+        {
+            float step = (rightShiftTarget - rightShiftCur) * Mathf.Min(1f, Time.deltaTime * 7f);
+            rightShiftCur += step;
+            if (Mathf.Abs(rightShiftTarget - rightShiftCur) < 0.5f)
+            {
+                rightShiftCur = rightShiftTarget;
+            }
+        }
         if (me == null || opponent == null)
         {
             me = ((GameObject)MonoBehaviour.Instantiate(mod_healthBar, new Vector3(1000, 0, 0), Quaternion.identity)).GetComponent<barPngLoader>();
@@ -197,21 +235,21 @@ public class gameInfo : MonoBehaviour
         instance_btnPan.gameObject.transform.localScale = ksb;
         opponent.transform.localScale = ks;
         me.transform.localScale = ks;
-        if (!swaped) 
+        if (!swaped)
         {
-            opponent.transform.localPosition = new Vector3(Screen.width / 2-14, Screen.height / 2 - 14);
-            me.transform.localPosition = new Vector3(Screen.width / 2 - 14, Screen.height / 2 - 14 - k * (float)(opponent.under.height));
+            opponent.transform.localPosition = new Vector3(Screen.width / 2 - 14 - rightShiftCur, Screen.height / 2 - 14);
+            me.transform.localPosition = new Vector3(Screen.width / 2 - 14 - rightShiftCur, Screen.height / 2 - 14 - k * (float)(opponent.under.height));
         }
         else
         {
-            me.transform.localPosition = new Vector3(Screen.width / 2 - 14, Screen.height / 2 - 14);
-            opponent.transform.localPosition = new Vector3(Screen.width / 2-14, Screen.height / 2 - 14 - k * (float)(opponent.under.height));
+            me.transform.localPosition = new Vector3(Screen.width / 2 - 14 - rightShiftCur, Screen.height / 2 - 14);
+            opponent.transform.localPosition = new Vector3(Screen.width / 2 - 14 - rightShiftCur, Screen.height / 2 - 14 - k * (float)(opponent.under.height));
         }
 
         width = (150 * kb) + 15f;
-        float localPositionPanX = (((float)Screen.width - 150 * kb) / 2) - 15f;
+        float localPositionPanX = (((float)Screen.width - 150 * kb) / 2) - 15f - rightShiftCur;
         instance_btnPan.transform.localPosition = new Vector3(localPositionPanX, 145, 0);
-        instance_lab.transform.localPosition = new Vector3(Screen.width/2-315, -Screen.height / 2+90, 0);
+        instance_lab.transform.localPosition = new Vector3(Screen.width / 2 - 315 - rightShiftCur, -Screen.height / 2 + 90, 0);
         // ── 哈希按钮列排布（2026-09-26 重写）───────────────────────────────────
         // 旧实现按「列表出现序号 j」算 y，而 addHashedButton 永远追加到列表末尾 ⇒
         // 不可用键「摘掉再挂回」就被排到列尾，顺序必乱（用户报的撤回四键乱序）。

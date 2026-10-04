@@ -95,6 +95,26 @@ public class SuperScrollView
         panel.clipOffset = new Vector2(0, magicNumber);
     }
 
+    /// <summary>
+    /// 面板可视区尺寸变过之后**重算滚动几何**（局部位置 + clipOffset）。
+    ///
+    /// 为什么需要：install() 里那三行数学（magicNumber）是按建构造时的
+    /// <c>GetViewSize()</c> 一次性算死的；之后任何人改了 panel 的锚点/可视高度
+    /// （检索窗详情版把列表向上扩进输入框那一排），不调这个的话
+    /// 滚动范围与裁剪偏移全是旧值 —— 表现为「列表上部留白/最后一行被裁掉」。
+    /// 幂等：按当前 GetViewSize() 重算，调多少次都一样。
+    /// </summary>
+    public void Refit()
+    {
+        float magicNumber = -(panel.GetViewSize().y) / 2 + heightOfEach;
+        uIScrollView.transform.localPosition = new Vector3(
+            uIScrollView.transform.localPosition.x,
+            -magicNumber,
+            uIScrollView.transform.localPosition.z
+            );
+        panel.clipOffset = new Vector2(0, magicNumber);
+    }
+
     public void selectArg(string[] task)
     {
         int index = -1;

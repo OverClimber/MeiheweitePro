@@ -126,7 +126,8 @@ public class Servant
     {
         if (toolBar != null)
         {
-            Vector3 vectorOfShowedBar_Screen = new Vector3(Screen.width - RightToScreen, buttomToScreen, 0);
+            // + barShiftExtra：别的 Servant（检索窗）临时让位推出的那一段，见 SetBarShift。
+            Vector3 vectorOfShowedBar_Screen = new Vector3(Screen.width - (RightToScreen + barShiftExtra), buttomToScreen, 0);
             iTween.MoveTo(toolBar, Program.camera_back_ground_2d.ScreenToWorldPoint(vectorOfShowedBar_Screen), 0.6f);
             toolBar.transform.localScale = new Vector3(((float)Screen.height) / 700f, ((float)Screen.height) / 700f, ((float)Screen.height) / 700f);
             var items = toolBar.GetComponentsInChildren<toolShift>();
@@ -141,7 +142,7 @@ public class Servant
     {
         if (toolBar != null)
         {
-            Vector3 vectorOfHidedBar_Screen = new Vector3(Screen.width - RightToScreen, -100, 0);
+            Vector3 vectorOfHidedBar_Screen = new Vector3(Screen.width - (RightToScreen + barShiftExtra), -100, 0);
             iTween.MoveTo(toolBar, Program.camera_back_ground_2d.ScreenToWorldPoint(vectorOfHidedBar_Screen), 0.6f);
             toolBar.transform.localScale = new Vector3(((float)Screen.height) / 700f, ((float)Screen.height) / 700f, ((float)Screen.height) / 700f);
             var items = toolBar.GetComponentsInChildren<toolShift>();
@@ -287,6 +288,72 @@ public class Servant
 
     float RightToScreen;
 
+    /// <summary>
+    /// 底部按钮条被**别的 Servant** 临时让位推出的额外宽度（px）。基准仍是本人
+    /// <see cref="RightToScreen"/>，这里只往上叠，所以两层让位可以并存（见 <see cref="SetBarShift"/>）。
+    /// </summary>
+    float barShiftExtra = 0f;
+
+    /// <summary>
+    /// 让位量：底部按钮条整体再往左挪 <paramref name="extra"/> 像素（0 = 归位）。
+    ///
+    /// 谁在用：点简介链接弹出的检索窗（<see cref="CardSearchWindow"/>）。它是**另一个 Servant**
+    /// 建的窗，却要推开**当前在场那位**的底栏 —— 就像卡组编辑器里「分类」弹窗靠
+    /// <c>DeckManager.refreshDetail</c> 把自己的条从 230 推到 460 那样（用户 2026-10-02
+    /// 第三轮口径：「像分类界面一样……能推开底下的按钮」）。
+    ///
+    /// ⛔ 为什么是"叠加"而不是直接改 <see cref="RightToScreen"/>：那一位自己还会 reShowBar
+    ///   （分类弹窗开合就在改基准 230/460），直接写会把它的基准冲掉；叠一层则
+    ///   「弹窗开着 + 检索窗也开着」= 460 + 窗宽，互不打架。
+    /// </summary>
+    public void SetBarShift(float extra)
+    {
+        if (Mathf.Approximately(barShiftExtra, extra))
+        {
+            return;
+        }
+        barShiftExtra = extra;
+        if (isShowed)
+        {
+            showBarOnly();
+        }
+    }
+
+    public float GetBarShift() { return barShiftExtra; }
+
+    /// <summary>
+    /// 当前在场、且**确实有一条底部按钮条**的那位 Servant（卡组编辑器 / 战斗 / 房间各一条）。
+    /// 给跨 Servant 让位用：检索窗不能写死"推 DeckManager 的条"，因为它在战斗里也要推 Ocgcore 的。
+    /// </summary>
+    public static Servant BarOwner()
+    {
+        try
+        {
+            Program p = Program.I();
+            if (p == null)
+            {
+                return null;
+            }
+            if (p.deckManager != null && p.deckManager.isShowed && p.deckManager.toolBar != null)
+            {
+                return p.deckManager;
+            }
+            if (p.ocgcore != null && p.ocgcore.isShowed && p.ocgcore.toolBar != null)
+            {
+                return p.ocgcore;
+            }
+            if (p.room != null && p.room.isShowed && p.room.toolBar != null)
+            {
+                return p.room;
+            }
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+        return null;
+    }
+
     public void SetBar(GameObject mod,float buttomToScreen,float RightToScreen)
     {
         this.buttomToScreen = buttomToScreen;
@@ -392,6 +459,16 @@ public class Servant
     public string currentMShash;
 
     private GameObject currentMSwindow = null;
+
+    /// <summary>
+    /// 当前对话框窗口的只读出口（<see cref="currentMSwindow"/> 是 private，子类也拿不到）。
+    /// 「译」菜单开完框之后要往上面补右上角那颗圆形 × 与「右键关闭」，
+    /// 必须从外面拿到这张窗 —— 见 <c>NameTranslationUI.DecorateMsWindow</c>。没有框时为 null。
+    /// </summary>
+    public GameObject CurrentMsWindow
+    {
+        get { return currentMSwindow; }
+    }
 
     public class messageSystemValue
     {

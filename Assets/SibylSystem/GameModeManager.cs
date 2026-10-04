@@ -57,6 +57,11 @@ public static class GameModeManager
         }
         current = mode;
         EnsureDeckDir();
+        // 译名也按模式分家（**RD 恒原生**，见 CardNameTranslation.AvailablePacks / Current）：
+        // 让卡池里那份"名字快照"整体失效一次。
+        // ⛔ 必须放在**广播之前**：等在 Changed 上刷界面的订阅者（菜单 / 设置 / 背景）跑起来时，
+        //   卡池里的名字已经是新模式那一份了 —— 否则会刷出一帧 OCG 译名的 RD 界面。
+        YGOSharp.CardNameTranslation.InvalidateForMode();
         if (QuickTestTrace.Enabled)
         {
             QuickTestTrace.Log("mode", "set -> " + ModeLabel
