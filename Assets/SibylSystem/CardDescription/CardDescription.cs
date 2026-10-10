@@ -52,7 +52,7 @@ public class CardDescription : Servant
         {
             description.textLabel.fontSize = int.Parse(Config.Get("fontSize","24"));
         }
-        catch (System.Exception e)
+        catch (System.Exception)
         {
         }
         installNameTranslationButton();
@@ -144,7 +144,7 @@ public class CardDescription : Servant
             underSprite.width = ca;
             picSprite.height =  cb; 
         }
-        catch (System.Exception e)
+        catch (System.Exception)
         {
         }
     }
@@ -194,6 +194,21 @@ public class CardDescription : Servant
     public YGOSharp.Card showingCard
     {
         get { return currentCard; }
+    }
+
+    /// <summary>
+    /// 说明面板此刻是不是**真的在显示**（决斗里它会被人抢走）。
+    /// <para>抢它的头号路径是 <c>Ocgcore.ES_mouseUpEmpty</c>：「全屏游戏」档下点空白处会
+    /// <c>shiftCardShower(false)</c> 收起说明、让位给「查看墓地/额外」那一览 —— 用户实测
+    /// 「锁了简介后点空白处简介就没了」就是它。2026-10-09 第三轮起那条路径已被
+    /// <see cref="CardDescLock.HoldsPanel"/> 挡在门外（锁着时压根不切），这里仍旧每帧自查一遍
+    /// ——「卡换位置时面板被重推」等别的路径照样会发生。</para>
+    /// 给「空格键锁定卡牌简介」的每帧补刷用（<see cref="CardDescLock.EnsureDesc"/>）。
+    /// 做成**属性**不占序列化字段（口径同 <see cref="showingCard"/>）。
+    /// </summary>
+    public bool descVisible
+    {
+        get { return cardShowerWidget != null && cardShowerWidget.alpha > 0.001f; }
     }
 
     public bool ifShowingThisCard(YGOSharp.Card card)   
@@ -2025,6 +2040,11 @@ public class CardDescription : Servant
             //   开窗的（ray 一次性、`rayDumped` 不复位，见函数头长注释）。
             Program.go(2500, () =>
             {
+                // 「空格锁简介」那一行的下拉**真的弹一次**，量它是朝下还是朝上
+                // （用户 2026-10-09：「最后一项空格锁简介怎么下拉框往上了」）。
+                // ⛔ 必须排在 ProbeTranslationPackRow 之前：它同一帧内 Show→量→Close，
+                //   不会留在屏上，也就不会影响后面 overlapN 那套既有判据的可比性。
+                st.ProbeLockPopupDirection();
                 st.ProbeTranslationPackRow();
                 QuickTestTrace.Log("nametrans", NameTranslationUI.ProbeMenuContents());
             });
@@ -3527,6 +3547,17 @@ public class CardDescription : Servant
         {
             return;
         }
+        // ── 「空格键锁定卡牌简介」（需求 2026-10-09 第 2 条）────────────────────
+        // 这里是全工程**唯一**的收口：决斗 3D 卡（gameCard.showMeLeft）、卡组编辑器
+        // 桌面卡与检索列表行（DeckManager.ES_HoverOverGameObject）三条悬停路径最终都
+        // 汇到 setData ⇒ 只在这一处判「压不压」，不必去三个宿主各改一遍。
+        // ⛔ 被锁的那张自己回来必须**放行**：否则把光标从别的卡挪回被锁卡时，
+        //   面板会停在别的卡上（用户口径里「点击其他卡则切换选中」的反方向）。
+        if (CardDescLock.ShouldSuppress(card.Id))
+        {
+            QuickTestTrace.Log("ms", "locked skip code=" + card.Id + " hold=" + CardDescLock.LockedId);
+            return;
+        }
         // 验收探针：这次调用真把哪张卡摆到了左侧说明面板上（`[ms] show code=<id>`）。
         // 「鼠标移到极大怪兽的 L/R 上要能直接看到**它自己**的效果」这条需求，判据就得咬
         // 这一行的 id —— 光验「面板没崩」验不出显示的是本体还是部件。
@@ -3640,7 +3671,7 @@ public class CardDescription : Servant
             {
                 all = all.Substring(0, all.Length - 1);
             }
-            catch (System.Exception e)
+            catch (System.Exception)
             {
             }
             UIHelper.trySetLableTextList(UIHelper.getByName(gameObject, "chat_"), all);

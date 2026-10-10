@@ -765,30 +765,15 @@ public class NameTranslationUI : Servant
     }
 
     /// <summary>
-    /// 按名字找子物体（**含失活节点**，自己走 Transform 递归）。
+    /// 按名字找子物体（**含失活节点**）——统一走 <see cref="CardSearchWindow.FindDeep"/>，
+    /// 不再自留一份递归实现（两处口径一致：都含失活、都按深度优先前序取首个同名节点）。
     /// ⛔ 不能用 <c>UIHelper.getByName</c>：它走 <c>GetComponentsInChildren&lt;T&gt;()</c>
     ///   的默认重载、会跳过失活对象；而这里要的两样（预制体资源里的 <c>cancle_</c>、框里的
     ///   <c>glass</c>）都不是"场景里活着的"那个意思。
     /// </summary>
     static GameObject FindDeep(Transform root, string name)
     {
-        if (root == null)
-        {
-            return null;
-        }
-        if (root.name == name)
-        {
-            return root.gameObject;
-        }
-        for (int i = 0; i < root.childCount; i++)
-        {
-            GameObject r = FindDeep(root.GetChild(i), name);
-            if (r != null)
-            {
-                return r;
-            }
-        }
-        return null;
+        return CardSearchWindow.FindDeep(root.gameObject, name);
     }
 
     /// <summary>

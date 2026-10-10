@@ -41,8 +41,14 @@ public static class ClientSelfUpdate
     /// <para>⛔⛔ 2.1（2026-10-04）：从 2.0 抬到 **2.1**。版本串只做**字符串相等**判定，
     ///    不看大小 ⇒ 抬到 2.1 后，2.0 的用户会被提示「发现新版本 v2.1」。
     ///    同样必须先让包上线、再抬仓库根的 `version.txt`（见上面①②与发版铁律）。
-    ///    增量包按 `2.0→2.1` 另出一份（它认版本串，不认大小）。</para></summary>
-    public const string ClientVersionText = "2.1";
+    ///    增量包按 `2.0→2.1` 另出一份（它认版本串，不认大小）。</para>
+    /// <para>⛔⛔ 2.2（2026-10-09）：从 2.1 抬到 **2.2** —— 用户点名的**开发版测试**动作，
+    ///    目的就是让「更新弹窗」（<see cref="Menu.ShowClientUpdateNotify"/>）必然被触发。
+    ///    判定口径没变（仍是**字符串不等**）⇒ 只要仓库根的 `version.txt` 还停在 2.1
+    ///    （本次**故意不同步抬**），客户端就会报「发现新版本 v2.1（当前 v2.2）」并弹窗。
+    ///    ⚠ 这正是上面①②那条铁律的**反向验证场景**：本次**只当测试**，不算正式发布；
+    ///    将来真发 2.2，仍必须「先让包上线、再抬 version.txt」，否则回到①②的坑。</para></summary>
+    public const string ClientVersionText = "2.2";
 
     /// <summary>版本文件在各源里的相对路径（仓库根 main 分支）。内容：纯文本，首行 = 版本串。</summary>
     const string VersionFileRel = "version.txt";
@@ -289,9 +295,28 @@ public static class ClientSelfUpdate
     {
         if (AlreadySeen(remoteVersion))
         {
-            return; // 同一版本提示过一次就不再打扰
+            return; // 同一版本弹过一次就不再打扰
         }
         MarkSeen(remoteVersion);
+        // 用户 2026-10-09 定稿：从「只往聊天栏打一行字」改成**弹窗**（参照 ygopro2 的
+        // 「发现 xxx，是否前往更新」）。判据是「玩家不去翻聊天栏也能知道有新版、并能一键前往」。
+        // 走 Menu 那套现成的 RMSshow_yesOrNo（与「资源更新」菜单同一个出口），
+        // 点「前往更新」→ OpenDownloadPage()。
+        // ⚠ 兜底：主菜单 servant 还没建起来（极早期启动）时退回聊天栏 —— 宁可少一次弹窗，
+        //   也不能因为 menu == null 让这条提示彻底消失。
+        try
+        {
+            Program p = Program.I();
+            if (p != null && p.menu != null)
+            {
+                p.menu.ShowClientUpdateNotify(Normalize(remoteVersion), ClientVersionText);
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.Log(e);
+        }
         Program.PrintToChat("发现新版本 v" + Normalize(remoteVersion)
             + "（当前 v" + ClientVersionText + "）—— 主菜单「资源更新」里可查看并前往下载。");
     }

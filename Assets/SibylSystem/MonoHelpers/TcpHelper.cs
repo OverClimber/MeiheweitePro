@@ -15,8 +15,6 @@ public static class TcpHelper
 
     static  NetworkStream networkStream = null;
 
-    static bool canjoin = true;
-
     // ===================== 连接层健壮性（对齐 hex 版 ygopro2 的 TcpHelper）=====================
     // 做的事：把「一条连接」显式建成带**代际**的对象；收发由「每包新建一个线程 + 共享 List」
     //         换成「单发送线程 + 每连接独立队列」；补上三种超时、TCP 保活、队列上限、瞬态错误重试。
@@ -608,7 +606,7 @@ public static class TcpHelper
                                 break;
                         }
                     }
-                    catch (System.Exception e)
+                    catch (System.Exception)
                     {
                        // Program.DEBUGLOG(e);
                     }

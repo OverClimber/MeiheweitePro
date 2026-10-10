@@ -55,8 +55,38 @@ public class MonoCardInDeckManager : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 「空格键锁定卡牌简介」的高亮标记（需求 2026-10-09；第二版外观＝**白框 + 卡面锁图标**，
+    /// 状态机与外观都在 <see cref="CardDescLock"/>）。本来这里挂的是「蓝框」，用户第二版口径
+    /// 改成「贴一层白色半透明的锁状图标，边缘也围起来一圈白」。
+    ///
+    /// <para>⛔ 私有字段：本类是**已烘焙进包**的 MonoBehaviour，加 public（可序列化）字段会让
+    /// 运行期按新类布局反序列化、读到数据末尾之外 ⇒ 报 `sharedassets0.assets corrupted`、
+    /// 开机必崩（notes/constraints.md §69）。要跨类传状态一律 private + 访问器。</para>
+    /// </summary>
+    GameObject lockMark;
+
+    /// <summary>
+    /// 按锁状态显隐标记。惰性建（只在第一次真要用到时才克隆/建物体）；
+    /// ⛔ 判据带 id（<see cref="CardDescLock.FrameOn"/>）：本类实例会被 DeckManager 复用去装
+    ///   别的卡，只比对象不加 id 的话「换卡之后标记还赖在旧卡上」。
+    /// </summary>
+    void SyncLockMark()
+    {
+        bool on = CardDescLock.FrameOn(gameObject, cardData != null ? cardData.Id : -1);
+        if (on && lockMark == null)
+        {
+            lockMark = CardDescLock.NewLockMark(gameObject.transform.Find("face"));
+        }
+        if (lockMark != null && lockMark.activeSelf != on)
+        {
+            lockMark.SetActive(on);
+        }
+    }
+
     void Update()
     {
+        SyncLockMark();
         if (loadedPicCode != cardData.Id)
         {
             Texture2D pic = GameTextureManager.get(cardData.Id, GameTextureType.card_picture);

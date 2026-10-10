@@ -2,8 +2,6 @@
 using System;
 public class Setting : WindowServant2D
 {
-    private EventDelegate onChange;
-
     public LAZYsetting setting;
 
     public override void initialize()
@@ -94,8 +92,20 @@ public class Setting : WindowServant2D
         // 「卡名翻译」排在「显示视角切换按钮」下面（用户 2026-10-02 要求做成设置项）。
         // ⚠ 它是**选择行**不是开关行，所以不占 <c>extraRowToggles</c>（save/refresh 都会跳过它）。
         CreateTranslationPackRow();
+        // 「空格键锁定卡牌简介」紧排在「卡名翻译」**下面**（需求 2026-10-09 第 2、3 点）。
+        // ⛔ 位置不能挪到 askMset_/askSummon_ 之后：那两行是**开关行**、走 extraRow 那套
+        //   24px 格阵（建行时按 slot 写死 localPosition，之后 SyncExtraRowVisibility 再按
+        //   基准 y 重排）。本行是**选择行**（下拉框，比开关行高），要靠
+        //   PushMiddleColumnDown 把中列整体下移来给自己腾位置 —— 必须在中列落定之前推，
+        //   否则那两行会被重排拉回原位，只剩窗口高度变高、本行与它们压在一起。
+        CreateLockDescRow();
         CreateAskMSetToggle();
         CreateAskSummonToggle();
+        // 「卡组界面自动启用输入」插在 askSummon_ 之后、RD 独占行之前（用户 2026-10-10 第 2 条）。
+        // ⛔ 加在这里的理由与上面对 LockDesc 行说的一样：它只是**普通开关行**，排在 askSummon_ 后面
+        //   ⇒ 上面几行（viewToggleBtn_ / askMset_ / askSummon_）的建行顺序（＝slot）一个都不动；
+        //   而 RD 独占的「极大怪兽一体化」仍留在末尾（见下一条注释）。
+        CreateDeckAutoInputToggle();
         // 「极大怪兽一体化」放在**最后**：它是 RD 独占行，排末尾才不会改动上面几行的 slot
         //（插中间会把 askMset_/askSummon_ 的行位整体下移，属无谓扰动）。
         CreateRdMaxIntegratedToggle();
@@ -106,6 +116,7 @@ public class Setting : WindowServant2D
         // 选择行的文案要在**所有**开关行都排完之后刷：它读的是 CardNameTranslation，
         // 与行位无关，但放在最后能让日志里的行位数字是最终态。
         RefreshTranslationPackRow();
+        RefreshLockDescRow();
     }
 
     /// <summary>
@@ -262,7 +273,18 @@ public class Setting : WindowServant2D
                 selfW = clone.GetComponentInChildren<UIWidget>(true);
             }
             int h = selfW != null ? selfW.height : (refW != null ? refW.height : 28);
-            const float gap = 8f;   // 行高 28 + 8 = 36 < 行距 40 ⇒ 不会压到更下面那一格
+            // ── 行距**照原生**（用户 2026-10-09：「下拉框之间的距离太大了…参考原生的距离」）──
+            // 口径：让本行的**中心**落在参照行中心下方**一整格**（整格 = 原生行距），
+            // 于是本行与上面那几个原生下拉框同节奏。
+            // ⛔ 别再把 gap 写成一个「看着够用」的正数：实测 gap=8 给出**行距 42**
+            //   （＝ refH/2 + gap + selfH/2 = 17+8+17），而原生行距是 **25**（见
+            //   `[setting] packrowdump`：vol_310/size_286/screen_238/atk_213/star_188），
+            //   肉眼看就是「离得老远」。反解 ⇒ gap = 原生行距 − (refH + h)/2，本例 = −9
+            //   （负值＝两行**重叠** 9px，原生 screen_/atk_/star_ 三行本来就是这样：都是 34 高的
+            //    下拉框、行距 25 ⇒ 逐行重叠 9px，观感正常）。
+            int refH = refW != null ? refW.height : h;
+            float gap = NativeColumnPitch(refRect.transform.parent, srcT.localPosition.x)
+                - (refH + h) * 0.5f;
             selfRect.leftAnchor.target = refRect.transform;
             selfRect.leftAnchor.relative = 0f;
             selfRect.leftAnchor.absolute = 0;
@@ -299,6 +321,9 @@ public class Setting : WindowServant2D
             return;
         }
         translationPackPopup = popup;
+        // 下拉一定朝下（理由与「空格锁简介」那一行的同名字段完全一样：NGUI 的 Auto 是按行的
+        // **左下角**视口 y 判上/下，本行 0.52、只差一点就会被翻上去 ⇒ 显式钉死，别靠运气）。
+        popup.position = UIPopupList.Position.Below;
         popup.onSelectionChange = onChangeTranslationPack;
         // 分辨率那串 "1280*720" 选项清掉，换成翻译表清单（按模式收窄，见 RebuildTranslationPackItems）。
         RebuildTranslationPackItems();
@@ -359,6 +384,356 @@ public class Setting : WindowServant2D
                 + " badge=" + RdBadgeShown(TranslationPackRow)
                 + " pos=" + clone.transform.localPosition.ToString("F1")
                 + " title=" + titleChanged + "/" + rawLabels);
+        }
+    }
+
+    // ══════════════ 「空格键锁定卡牌简介」下拉行（需求 2026-10-09 第 2、3 点）══════════════
+    // 与「卡名翻译」那一行**同一套做法**（克隆 screen_ → 声明式锚点 → 给中列腾位置 → 克隆体
+    // 自带的「分辨率」标题/清单要换掉），差别只有两处：
+    //   ① 锚点挂在**卡名翻译那一行的下边**（用户要它紧排其下），不是「左列最底行的下边」；
+    //   ② 它不是开关行、也不写 translation/settings.txt —— 真源是 Config 的 descLock_，
+    //      OCG / RD **共用一份**（见 CardDescLock）。
+
+    /// <summary>本行的节点名。</summary>
+    const string LockDescRow = "descLock_";
+
+    /// <summary>本行的行标题。
+    /// ⛔ **别写长**：这一格标题标签只有 100px 宽、而且是「缩字适配」的（NGUI ShrinkContent）——
+    ///   实测 9 个汉字会被压到约 50% 字号（原生的标题上限就是 5 个字＝正好铺满 100px）。
+    ///   用户 2026-10-09 拍板用 **「空格锁简介」**（5 字，与「特写攻击力」同长，正好铺满）。
+    ///   想再改长，得先把标题标签加宽（值那一格从 x=771 起，没地方让）。</summary>
+    const string LockDescRowTitle = "空格锁简介";
+
+    /// <summary>
+    /// 左列那一串同 x 行的**原生行距**（相邻可见行本地 y 差的中位数）。
+    ///
+    /// <para>为什么必须现量：<c>prefab</c> 里行距 40、运行时是 24~25，两处早就对不上
+    /// （见 <see cref="PlaceTranslationPackRow"/> 头注「猜不得」）。实测运行时左列
+    /// （<c>[setting] packrowdump</c>）：vSize_ 263 / size_ 286 / screen_ 238 / atk_ 213 /
+    /// star_ 188，相邻差 23·24·25·25。</para>
+    ///
+    /// <para>为什么取**中位数**而不是最小值：这一列里夹着一个**失活的** <c>alpha_</c>（占着槽位、
+    /// 但 <c>activeSelf==false</c> ⇒ 量不到）⇒ size_→screen_ 的差被拉成 48；而最小的 23 来自
+    /// vSize_/size_ 那一对，用它会把整列摆得偏紧。中位数最稳。</para>
+    /// </summary>
+    private float NativeColumnPitch(Transform parent, float colX)
+    {
+        const float fallback = 25f;
+        if (parent == null)
+        {
+            return fallback;
+        }
+        System.Collections.Generic.List<float> ys = new System.Collections.Generic.List<float>();
+        for (int i = 0; i < parent.childCount; i++)
+        {
+            Transform c = parent.GetChild(i);
+            if (c == null || !c.gameObject.activeSelf)
+            {
+                continue;
+            }
+            if (c.name == TranslationPackRow || c.name == LockDescRow)
+            {
+                continue;                       // 我们自己加的两行不算"原生"
+            }
+            if (Mathf.Abs(c.localPosition.x - colX) > 6f)
+            {
+                continue;                       // 只看同一列
+            }
+            ys.Add(c.localPosition.y);
+        }
+        if (ys.Count < 3)
+        {
+            return fallback;
+        }
+        ys.Sort();
+        System.Collections.Generic.List<float> diffs = new System.Collections.Generic.List<float>();
+        for (int i = 1; i < ys.Count; i++)
+        {
+            float d = ys[i] - ys[i - 1];
+            if (d > 1f)
+            {
+                diffs.Add(d);
+            }
+        }
+        if (diffs.Count == 0)
+        {
+            return fallback;
+        }
+        diffs.Sort();
+        return diffs[diffs.Count / 2];
+    }
+
+    /// <summary>本行下拉框（建行时存下来，刷值用）。</summary>
+    private UIPopupList lockDescPopup;
+
+    private void CreateLockDescRow()
+    {
+        UIPopupList src = UIHelper.getByName<UIPopupList>(gameObject, "screen_");
+        if (src == null || UIHelper.getByName(gameObject, LockDescRow) != null)
+        {
+            return;
+        }
+        GameObject refRow = UIHelper.getByName(gameObject, TranslationPackRow);
+        UIRect refRect = refRow != null ? refRow.GetComponent<UIRect>() : null;
+        if (refRect == null)
+        {
+            // 「卡名翻译」那一行没建起来（prefab 结构变了）⇒ 宁可这一行不存在，
+            // 也别摆一个位置乱掉的控件（与 CreateTranslationPackRow 的兜底口径一致）。
+            return;
+        }
+        GameObject clone = UnityEngine.Object.Instantiate(src.gameObject);
+        clone.name = LockDescRow;
+        clone.transform.SetParent(src.transform.parent, false);
+        clone.transform.localScale = src.transform.localScale;
+        UIRect selfRect = clone.GetComponent<UIRect>();
+        int selfH = 28;
+        if (selfRect != null)
+        {
+            UIWidget selfW = selfRect as UIWidget;
+            if (selfW == null)
+            {
+                selfW = clone.GetComponentInChildren<UIWidget>(true);
+            }
+            if (selfW != null)
+            {
+                selfH = selfW.height;
+            }
+            // 行距照原生（与「卡名翻译」那一行同一个算式、同一份理由，见 CreateTranslationPackRow：
+            // 目标＝中心落在参照行中心下方一整格；原生行距现量，不写死）。
+            int refH = refRect is UIWidget ? ((UIWidget)refRect).height : selfH;
+            float gap = NativeColumnPitch(refRect.transform.parent, src.transform.localPosition.x)
+                - (refH + selfH) * 0.5f;
+            selfRect.leftAnchor.target = refRect.transform;
+            selfRect.leftAnchor.relative = 0f;
+            selfRect.leftAnchor.absolute = 0;
+            selfRect.rightAnchor.target = refRect.transform;
+            selfRect.rightAnchor.relative = 1f;
+            selfRect.rightAnchor.absolute = 0;
+            selfRect.topAnchor.target = refRect.transform;
+            selfRect.topAnchor.relative = 0f;                    // 参照物的**下**边
+            selfRect.topAnchor.absolute = -Mathf.RoundToInt(gap);
+            selfRect.bottomAnchor.target = refRect.transform;
+            selfRect.bottomAnchor.relative = 0f;
+            selfRect.bottomAnchor.absolute = -Mathf.RoundToInt(gap + selfH);
+            selfRect.ResetAndUpdateAnchors();
+            // 给这一行腾位置 —— 与「卡名翻译」当初给自己腾位置是同一个动作
+            // （中列整体下移）；PushMiddleColumnDown 把格数**累加**进 packRowReserveRows，
+            // 窗口高度由 GrowWindowForExtraRows 跟着长。
+            PushMiddleColumnDown(clone.transform.localPosition.y - selfH * 0.5f,
+                refRow.transform.localPosition.y);
+        }
+        else
+        {
+            // 兜底：锚点算不出来就挂在参照行下面一格（40px）。
+            clone.transform.localPosition = refRow.transform.localPosition + new Vector3(0f, -40f, 0f);
+        }
+
+        UIPopupList popup = clone.GetComponent<UIPopupList>();
+        if (popup == null)
+        {
+            UnityEngine.Object.Destroy(clone);
+            return;
+        }
+        lockDescPopup = popup;
+        // 下拉一定**朝下**（用户 2026-10-09：「最后一项空格锁简介怎么下拉框往上了」）。
+        // 根因在 NGUI：UIPopupList.position 默认 Auto ⇒ 按**行左下角**的视口 y 判上/下
+        // （UIPopupList.cs:1041 `placeAbove = viewPos.y < 0.5f`；而 min 取的是
+        // `CalculateRelativeWidgetBounds(...).min`，就是行的左下角）—— 本行是左列最靠下的
+        // 一行，左下角视口 y ≈ 0.49 被算成「贴着屏幕下缘」⇒ 翻上去。左列其余几行都在 0.5
+        // 以上（分辨率 0.61 / 卡名翻译 0.52），所以只有这一行是反的。
+        popup.position = UIPopupList.Position.Below;
+        popup.onSelectionChange = onChangeLockDesc;
+        RebuildLockDescItems();
+        // 克隆体带过来的**行标题**要换成我们自己的（screen_ 的标题是「分辨率」）。
+        // 判据与 CreateTranslationPackRow 完全一致：显示当前值的那个标签不能动，其余非空标签改标题。
+        // ⛔ 别按标签名写死（NGUI 的标签名随 prefab 版本变过）。
+        foreach (UILabel l in clone.GetComponentsInChildren<UILabel>(true))
+        {
+            if (l == null || string.IsNullOrEmpty(l.text) || l.text == popup.value)
+            {
+                continue;
+            }
+            l.text = LockDescRowTitle;
+        }
+        hinter hint = clone.GetComponent<hinter>();
+        if (hint == null)
+        {
+            hint = clone.AddComponent<hinter>();
+        }
+        hint.str = "按空格键把光标所指卡牌的简介钉住（再按一次 / 按在无 UI 处解除）";
+        // 行位刚被 PushMiddleColumnDown 改过基准 ⇒ 让追加开关行按新基准重排、窗口跟着长高。
+        SyncExtraRowVisibility();
+        RefreshLockDescRow();
+        if (QuickTestTrace.Enabled)
+        {
+            QuickTestTrace.Log("setting", "lockrow items=" + popup.items.Count
+                + " cur=" + popup.value
+                + " mode=" + CardDescLock.Current
+                + " reserve=" + packRowReserveRows
+                + " pos=" + clone.transform.localPosition.ToString("F1"));
+        }
+    }
+
+    /// <summary>把克隆体从 screen_ 带来的「分辨率」清单换成档位清单。</summary>
+    private void RebuildLockDescItems()
+    {
+        if (lockDescPopup == null)
+        {
+            return;
+        }
+        try
+        {
+            // ⛔ 与 RebuildTranslationPackItems 同一个坑：UIPopupList.value 的 setter
+            //   会**无条件** TriggerCallbacks（值没变也触发）⇒ 改 items/value 之前必须先把
+            //   onSelectionChange 摘掉，否则开一次设置窗口就白跑一遍 SetModeByIndex
+            //   （那还会顺手把当前锁解掉，属可见的副作用）。
+            UIPopupList.LegacyEvent cb = lockDescPopup.onSelectionChange;
+            lockDescPopup.onSelectionChange = null;
+            lockDescPopup.Clear();
+            for (int i = 0; i < CardDescLock.ModeCount; i++)
+            {
+                lockDescPopup.AddItem(CardDescLock.LabelOf(CardDescLock.ModeAt(i)));
+            }
+            lockDescPopup.value = CardDescLock.LabelOf(CardDescLock.Current);
+            lockDescPopup.onSelectionChange = cb;
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+    }
+
+    /// <summary>把下拉框显示值刷成当前档位（同 RefreshTranslationPackRow：相同值不写回）。</summary>
+    private void RefreshLockDescRow()
+    {
+        if (lockDescPopup == null)
+        {
+            GameObject go = UIHelper.getByName(gameObject, LockDescRow);
+            lockDescPopup = go != null ? go.GetComponent<UIPopupList>() : null;
+        }
+        if (lockDescPopup == null)
+        {
+            return;
+        }
+        string cur = CardDescLock.LabelOf(CardDescLock.Current);
+        if (lockDescPopup.value != cur)
+        {
+            lockDescPopup.value = cur;
+        }
+    }
+
+    /// <summary>
+    /// 验收用：把「空格锁简介」的下拉框**真的弹出来**，把 NGUI 算出来的落点摊到日志里
+    /// —— 直接观察这一框是朝下还是朝上（用户 2026-10-09：「最后一项空格锁简介怎么下拉框往上了」）。
+    ///
+    /// <para>为什么必须测而不能只看代码：<c>UIPopupList</c> 判朝上/朝下只看 <c>position</c> 一个字段
+    /// （<c>UIPopupList.cs:1039</c>；<c>Position.Auto</c> 时按行**左下角**的视口 y 与 0.5 比，
+    /// 同文件 1041-1050），而这一行的左下角视口 y 实测 486/986 = <b>0.493</b> —— 正好卡在
+    /// 0.5 下面一点点。同列的「卡名翻译」是 511/986 = 0.518 ⇒ 那行一直朝下没人报，只有**最下面
+    /// 这一行**翻上去，与用户报的症状完全对上。这种「差一点」的位置只能把框真弹出来量。</para>
+    ///
+    /// <para>⛔ 全程**同一帧内** Show → 量 → Close：不要留在屏上（外部截图会拍到，
+    /// 但也可能被 <c>CloseIfUnselected</c> 协程先收掉，属不可控）。<c>CloseSelf</c> 会同步把
+    /// <c>mChild</c> 置空（`UIPopupList.cs:722`）⇒ 不会给下一次 Show 留下"mChild 非空"的拦路。</para>
+    ///
+    /// <para>读「弹出来的那一坨」用**反射**读 <c>UIPopupList.mChild</c>（private static、
+    /// 无公开访问器）。反射取不到只记 <c>popup=?</c>，不影响其余验收判据。</para>
+    /// </summary>
+    public void ProbeLockPopupDirection()
+    {
+        try
+        {
+            if (lockDescPopup == null)
+            {
+                RefreshLockDescRow();
+            }
+            if (lockDescPopup == null)
+            {
+                QuickTestTrace.Log("setting", "lockpopup skip (no popup)");
+                return;
+            }
+            GameObject row = UIHelper.getByName(gameObject, LockDescRow);
+            // ⛔ 必须**先赋 0** 再当 out 参数用：下面这两处 `out` 都在 `&&` 右边，
+            //   row/child 为 null 时短路不调用、out 变量就没被赋值 ⇒ 不初始化会 CS0165
+            //   （编译器不会因为"后面用 rowOk/popOk 守着"就认它已赋值）。
+            float rx0 = 0f, ry0 = 0f, rx1 = 0f, ry1 = 0f;
+            bool rowOk = row != null && RowScreenRect(row, out rx0, out ry0, out rx1, out ry1);
+
+            lockDescPopup.Show();                       // 这一句里 NGUI 就把落点算完了
+
+            GameObject child = PopupChild();
+            float cx0 = 0f, cy0 = 0f, cx1 = 0f, cy1 = 0f;
+            bool popOk = false;
+            if (child != null)
+            {
+                // ⛔ 量的是**整块并集**（RowScreenRect 把该物体下所有可见 UIWidget 并起来），
+                //   不能取 GetComponentInChildren<UIWidget>() 的那一个：那是 mHighlight
+                //   （只包住**单条**选项的高亮条，~26px 高），拿它当"弹出来的那一坨"会把
+                //   96px 高的清单量成 26px，方向判断直接失真（2026-10-09 实测踩到）。
+                popOk = RowScreenRect(child, out cx0, out cy0, out cx1, out cy1);
+            }
+            // 判据：弹出来的整块矩形，其**中心**落在本行中心的下方 ⇒ 朝下展开。
+            // ⛔ 别用「两个矩形有没有交叠」判：NGUI 的落点是行的**左下角**，朝下展开时
+            //   弹块仍会与本行底部重叠几个像素（实测 5px，见日志里 row / popup 两个矩形），
+            //   按交叠判会把「正确朝下」误报成 overlap。
+            string dir = "?";
+            if (rowOk && popOk)
+            {
+                dir = ((cy0 + cy1) * 0.5f < (ry0 + ry1) * 0.5f) ? "below" : "above";
+            }
+            QuickTestTrace.Log("setting", "lockpopup pos=" + ((int)lockDescPopup.position)
+                + " isOpen=" + UIPopupList.isOpen
+                + " dir=" + dir
+                + " row=[" + Mathf.RoundToInt(rx0) + ".." + Mathf.RoundToInt(rx1) + ","
+                + Mathf.RoundToInt(ry0) + ".." + Mathf.RoundToInt(ry1) + "]"
+                + " popup=[" + (popOk
+                    ? (Mathf.RoundToInt(cx0) + ".." + Mathf.RoundToInt(cx1) + ","
+                       + Mathf.RoundToInt(cy0) + ".." + Mathf.RoundToInt(cy1))
+                    : "?")
+                + "] items=" + lockDescPopup.items.Count
+                + " screenH=" + Screen.height);
+
+            UIPopupList.Close();                        // 量完立刻收，不留残影给后面几档
+        }
+        catch (Exception e)
+        {
+            Program.DEBUGLOG(e);
+        }
+    }
+
+    /// <summary>反射读 <c>UIPopupList.mChild</c>（弹出来的那一坨；private static，无公开访问器）。</summary>
+    static GameObject PopupChild()
+    {
+        try
+        {
+            System.Reflection.FieldInfo fi = typeof(UIPopupList).GetField("mChild",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            return fi != null ? (fi.GetValue(null) as GameObject) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>选了一个档位：写 Config（OCG/RD 共用一份）+ 立刻生效 + 清掉当前锁。</summary>
+    private void onChangeLockDesc(string label)
+    {
+        int idx = 0;
+        for (int i = 0; i < CardDescLock.ModeCount; i++)
+        {
+            if (CardDescLock.LabelOf(CardDescLock.ModeAt(i)) == label)
+            {
+                idx = i;
+                break;
+            }
+        }
+        CardDescLock.SetModeByIndex(idx);
+        if (QuickTestTrace.Enabled)
+        {
+            QuickTestTrace.Log("setting", "lockrow picked=" + label
+                + " mode=" + CardDescLock.Current
+                + " key=" + CardDescLock.ConfigKey);
         }
     }
 
@@ -425,7 +800,6 @@ public class Setting : WindowServant2D
 
     const string TranslationPackRow = "transPack_";
     private UIPopupList translationPackPopup;
-    private UILabel translationPackLabel;
     /// <summary>旧版（开关行）留下的勾选框引用；下拉版没有它，恒为 null，探针在读。</summary>
     private UIWidget translationPackMark;
     /// <summary>还要继续摆几帧「卡名翻译」那一行（窗口刚开时锚点还没算好，多摆几次；落定即停）。</summary>
@@ -516,7 +890,13 @@ public class Setting : WindowServant2D
             float colX = colT.localPosition.x;
             const float halfRow = 12f;      // 开关行 24 高（屏幕实测：full_ 508..532 等）
             const float pitch = 24f;
-            const float margin = 6f;        // 本行下沿与下一行上沿之间至少留这么多
+            // 本行下沿与下一行上沿之间至少留这么多。
+            // ⛔ 这个数**不能大**（用户 2026-10-09：「另外几个下拉框项和下面的配置项距离太远了」）：
+            //   「移几格」是 `ceil((topEdge + margin − ourLocalBottom) / 24)` —— margin 一大就会**向上取整
+            //   到下一整格**，白白多让出 20 多像素。实测 margin=6 时两位调用者各多要一格（共 3 格＝72），
+            //   结果「空格锁简介」下沿与「全屏游戏」上沿之间空出 26px（原生那一对只差 1~4px）；
+            //   降到 2 之后正好各占一格（共 2 格＝48），缝隙回到 2px、与原生同观感，窗口也少长 24。
+            const float margin = 2f;
             // 只算**插入点之下**的那些行（插入点上方没有别的行，但别把将来的改动算漏）。
             float topEdge = float.MinValue;
             for (int i = 0; i < par.childCount; i++)
@@ -570,7 +950,11 @@ public class Setting : WindowServant2D
             {
                 extraRowSrcLocalPos.y += dy;
             }
-            packRowReserveRows = grids;
+            // ⚠ **累加**，不是覆盖：本方法现在有两位调用者（「卡名翻译」与「空格键锁定卡牌简介」），
+            //   各自给自己腾过一次位置 ⇒ 窗口要长的是两次之和。覆盖的话第二个调用会把第一个
+            //   让出来的高度抹掉 ⇒ 窗口偏矮、最底下那几行被窗口底边切掉
+            //   （GrowWindowForExtraRows 读的就是这个数）。
+            packRowReserveRows += grids;
             if (QuickTestTrace.Enabled)
             {
                 QuickTestTrace.Log("setting", "packrow pushcol dy=" + dy.ToString("F0")
@@ -1141,6 +1525,25 @@ public class Setting : WindowServant2D
     private void CreateAskSummonToggle()
     {
         AddExtraToggleRow("askSummon_", "召唤怪兽前询问", () => GameModeManager.KeyAskSummon, "1", true);
+    }
+
+    /// <summary>
+    /// 「卡组界面自动启用输入」开关（用户 2026-10-10 第 2 条）：**默认关**。
+    ///
+    /// <para>症状：进卡组编辑器（或点一次「检索」）之后，右上那个关键字输入框会被自动
+    /// <c>UIInput.isSelected = true</c> 抢到焦点 ⇒ 玩家随后按的键（方向键/WASD/回车…）全被当
+    /// 关键字吃进搜索框里。用户要求「做成配置项、默认关闭」。</para>
+    ///
+    /// <para>关掉之后：<b>不再自动</b>给输入框焦点；玩家想打字时**点一下输入框**即可（
+    /// <see cref="UIInput"/> 自己处理点击取焦），功能一点都不少。</para>
+    ///
+    /// <para>落盘键 <c>deckAutoInput_</c>（普通开关行，OCG/RD 共用一份 —— 卡组编辑器两边同一套 UI）。
+    /// 消费方：<c>DeckManager.AutoInputEnabled</c>（<c>setGoodLooking</c> 与 <c>process</c> 两处
+    /// 自动取焦前的闸门）。⛔ 值只能在这里与 <c>DeckManager</c> 里各有一份读法，别在别处再抄一个键名。</para>
+    /// </summary>
+    private void CreateDeckAutoInputToggle()
+    {
+        AddExtraToggleRow("deckAutoInput_", "卡组界面自动启用输入", () => "deckAutoInput_", "0");
     }
 
     /// <summary>RD 主色调（琥珀）。与主菜单 <c>Menu.ModeColorRD</c> **同值** —— 同一个「RD」标记跨界面必须一个颜色。</summary>
@@ -1791,11 +2194,8 @@ public class Setting : WindowServant2D
         Program.I().mouseParticle.SetActive(setting.mouseEffect.value);
     }
 
-    //private int dontResizeTwice = 2;
-
     public void setScreenSizeValue()
     {
-        //dontResizeTwice = 3;
         UIHelper.getByName<UIPopupList>(gameObject, "screen_").value = Screen.width.ToString() + "*" + Screen.height.ToString();
     }
 
@@ -1805,7 +2205,7 @@ public class Setting : WindowServant2D
         {
             Program.I().ocgcore.realize(true);
         }
-        catch (Exception e) 
+        catch (Exception) 
         {
         }
     }
@@ -1853,13 +2253,8 @@ public class Setting : WindowServant2D
     }
 
 
-    UISlider sliderAlpha;
     void onChangeAlpha()
     {
-        if (sliderAlpha != null)
-        {
-            Program.transparency = 1.5f * sliderAlpha.value;
-        }
         Program.transparency = 1f;
     }
 
@@ -1977,12 +2372,6 @@ public class Setting : WindowServant2D
 
     void resizeScreen()
     {
-        //if (dontResizeTwice > 0)
-        //{
-        //    dontResizeTwice--;
-        //    return;
-        //}
-        //dontResizeTwice = 2;
         if (UIHelper.isMaximized())
             UIHelper.RestoreWindow();
         string[] mats = UIHelper.getByName<UIPopupList>(gameObject, "screen_").value.Split(new string[] { "*" }, StringSplitOptions.RemoveEmptyEntries);
@@ -2040,6 +2429,17 @@ public class Setting : WindowServant2D
         Config.Set("handPosition_", UIHelper.fromBoolToString(UIHelper.getByName<UIToggle>(gameObject, "handPosition_").value));
         Config.Set("handmPosition_", UIHelper.fromBoolToString(UIHelper.getByName<UIToggle>(gameObject, "handmPosition_").value));
         Config.Set("spyer_", UIHelper.fromBoolToString(UIHelper.getByName<UIToggle>(gameObject, "spyer_").value));
+        // 「空格键锁定卡牌简介」（descLock_）：它是**下拉框**不是开关行，不在上面的
+        // extraToggleRowNames 循环里。正常路径上 onChangeLockDesc 已经「改动即存」，
+        // 这里补一道是为了「窗口被强杀 / 崩溃」时这一项也别丢 —— 与 topDown_ 那行自己
+        // 补 save() 是同一个理由。
+        // ⛔ 这里**只写 Config、不调 CardDescLock.SetModeByIndex**：那个方法会顺手解锁，
+        //   而 save() 每次改任一开关都会被调 ⇒ 用它会变成「碰一下别的设置就把锁解掉」。
+        if (lockDescPopup != null)
+        {
+            Config.Set(CardDescLock.ConfigKey,
+                ((int)CardDescLock.ParseLabel(lockDescPopup.value)).ToString());
+        }
         // 追加行都在「改动即存」这一档：消费方（卡组界面点测试、决斗里点盖放）
         // 是实时读 Config 的，只靠 saveWhenQuit 的话运行中永远读不到。
         for (int i = 0; i < extraToggleRowNames.Count; i++)

@@ -1575,8 +1575,6 @@ public class SelectServer : WindowServantSP
         }
     }
 
-    GameObject faceShow = null;
-
     void onClickFace()
     {
         name = UIHelper.getByName<UIInput>(gameObject, "name_").value;

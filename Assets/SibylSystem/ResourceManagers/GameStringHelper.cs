@@ -450,7 +450,7 @@ public class GameStringHelper
             re += "[sup]" + card.Id.ToString() + "[/sup]";
             re += "\n";
         }
-        catch (Exception e)
+        catch (Exception)
         {
         }
 
@@ -493,7 +493,7 @@ public class GameStringHelper
             else re += "[ff8000]" + mainType(card.Type);
             re += "[-]";
         }
-        catch (Exception e)
+        catch (Exception)
         {
         }
 
@@ -674,7 +674,7 @@ public class GameStringHelper
             }
             re += "[-]";
         }
-        catch (Exception e)
+        catch (Exception)
         {
         }
         return re;
@@ -798,7 +798,7 @@ public class GameStringHelper
             }
             re += "[-]";
         }
-        catch (Exception e)
+        catch (Exception)
         {
         }
         return re;
@@ -821,10 +821,6 @@ public class GameStringHelper
                 {
                     var setArray = GameStringManager.xilies[i].content.Split('\t');
                     var setString = setArray[0];
-                    //if (setArray.Length > 1)
-                    //{
-                    //    setString += "[sup]" + setArray[1] + "[/sup]";
-                    //}
                     returnValue.Add(setString);
                 }
             }

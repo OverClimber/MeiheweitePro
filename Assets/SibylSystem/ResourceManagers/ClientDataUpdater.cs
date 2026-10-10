@@ -73,7 +73,6 @@ public static class ClientDataUpdater
     public static bool AnyFileUpdated { get; private set; }
 
     static bool _transactionActive;
-    static bool _recoveryFailed;
     static bool _running;
     static bool _reloadPending;
 
@@ -181,7 +180,6 @@ public static class ClientDataUpdater
         }
         if (!RecoverTransaction())
         {
-            _recoveryFailed = true;
             throw new IOException("无法恢复上一次未完成的数据更新。");
         }
 
@@ -211,7 +209,6 @@ public static class ClientDataUpdater
             File.WriteAllLines(TransactionManifest, manifest);
             File.WriteAllText(TransactionReadyMarker, DateTime.UtcNow.ToString("O"));
             _transactionActive = true;
-            _recoveryFailed = false;
         }
         catch
         {
@@ -236,7 +233,6 @@ public static class ClientDataUpdater
         if (!Directory.Exists(TransactionRoot))
         {
             _transactionActive = false;
-            _recoveryFailed = false;
             return true;
         }
 
@@ -244,7 +240,6 @@ public static class ClientDataUpdater
         {
             // 没有 ready 标记 = 上次已经提交或回滚过，剩下的只是清理残留。
             _transactionActive = false;
-            _recoveryFailed = false;
             try
             {
                 Directory.Delete(TransactionRoot, true);
@@ -265,7 +260,6 @@ public static class ClientDataUpdater
         if (!Directory.Exists(TransactionRoot))
         {
             _transactionActive = false;
-            _recoveryFailed = false;
             return true;
         }
 
@@ -275,7 +269,6 @@ public static class ClientDataUpdater
             string[] manifest = File.ReadAllLines(TransactionManifest);
             if (manifest.Length != targets.Length)
             {
-                _recoveryFailed = true;
                 return false;
             }
 
@@ -285,22 +278,18 @@ public static class ClientDataUpdater
                 string[] flags = manifest[i].Split('|');
                 if (flags.Length != 2)
                 {
-                    _recoveryFailed = true;
                     return false;
                 }
                 if ((flags[0] != "0" && flags[0] != "1") || (flags[1] != "0" && flags[1] != "1"))
                 {
-                    _recoveryFailed = true;
                     return false;
                 }
                 if (flags[0] == "1" && !File.Exists(Path.Combine(TransactionRoot, i + ".data")))
                 {
-                    _recoveryFailed = true;
                     return false;
                 }
                 if (flags[1] == "1" && !File.Exists(Path.Combine(TransactionRoot, i + ".etag")))
                 {
-                    _recoveryFailed = true;
                     return false;
                 }
             }
@@ -341,7 +330,6 @@ public static class ClientDataUpdater
             // 删掉 ready 标记 = 回滚完成点；剩下的目录清理失败也不影响正确性。
             File.Delete(TransactionReadyMarker);
             _transactionActive = false;
-            _recoveryFailed = false;
             try
             {
                 Directory.Delete(TransactionRoot, true);
@@ -355,7 +343,6 @@ public static class ClientDataUpdater
         catch (Exception e)
         {
             Program.DEBUGLOG(e);
-            _recoveryFailed = true;
             return false;
         }
     }
@@ -444,7 +431,6 @@ public static class ClientDataUpdater
         {
             if (!RecoverTransaction())
             {
-                _recoveryFailed = true;
                 LastError = "上次更新未安全恢复";
                 State = UpdateState.Failed;
                 PrintToChat("上次数据更新未能安全恢复，请重启游戏后重试。");

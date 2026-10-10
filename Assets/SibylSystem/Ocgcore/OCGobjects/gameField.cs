@@ -1419,50 +1419,6 @@ public class GameField : OCGobject
         destroy(big_string, 3f);
     }
 
-    //GameObject big_string;
-    //public void animation_show_big_string(string str)
-    //{
-    //    if (this.big_string!=null) 
-    //    {
-    //        destroy(this.big_string);
-    //    }
-    //    big_string = create(Program.I().mod_ocgcore_card_number_shower);
-    //    TMPro.TextMeshPro text_mesh = big_string.GetComponent<TMPro.TextMeshPro>();
-    //    TMPro.TextContainer text_container = big_string.GetComponent<TMPro.TextContainer>();
-    //    text_container.width = 60;
-    //    text_container.height = 10;
-    //    text_mesh.text = str;
-    //    text_mesh.alignment = TMPro.TextAlignmentOptions.Center;
-
-
-    //    Vector3 screenP = Program.camera_game_main.WorldToScreenPoint(Vector3.zero);
-    //    screenP.z = 18f;
-    //    int bun = Screen.height / 3;
-    //    if (screenP.y > Screen.height / 2 + bun)
-    //    {
-    //        screenP.y = Screen.height / 2 + bun;
-    //    }
-    //    if (screenP.y < Screen.height / 2 - bun)
-    //    {
-    //        screenP.y = Screen.height / 2 - bun;
-    //    }
-    //    big_string.transform.position = Program.camera_game_main.ScreenToWorldPoint(screenP);
-
-    //    big_string.AddComponent<animation_screen_lock2>();
-    //    big_string.transform.localScale = Vector3.zero;
-    //    iTween.ScaleTo(big_string, new Vector3(0.7f, 0.7f, 0.7f), 0.3f);
-    //    iTween.RotateTo(big_string, new Vector3(60, 0, 0), 0.3f);
-    //    iTween.ScaleTo(big_string, iTween.Hash(
-    //                       "delay", 0.6f,
-    //                       "x", 0,
-    //                       "y", 0,
-    //                       "z", 0,
-    //                       "time", 0.3f
-    //                       ));
-    //    destroy(big_string, 3f);
-    //    Program.I().ocgcore.Sleep(30);
-    //}
-
     class field_disabled_container
     {
         public GPS p;
@@ -1603,22 +1559,6 @@ public class GameField : OCGobject
         label.text = currentString;
 
         logPhaseBarWhenChanged();
-
-        //if (Program.I().setting.setting.closeUp.value)
-        //{
-        //    if (label.gameObject.activeInHierarchy==false)  
-        //    {
-        //        label.gameObject.SetActive(true);
-        //    }
-        //    label.text = currentString;
-        //}
-        //else
-        //{
-        //    if (label.gameObject.activeInHierarchy == true)
-        //    {
-        //        label.gameObject.SetActive(false);
-        //    }
-        //}
     }
 
     public void clearDisabled() 

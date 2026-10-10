@@ -390,7 +390,7 @@ public class Book : WindowServant2D
         {
             all = all.Substring(0, all.Length - 1);
         }
-        catch (System.Exception e)
+        catch (System.Exception)
         {
         }
         try

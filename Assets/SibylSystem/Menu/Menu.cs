@@ -2480,12 +2480,45 @@ public class Menu : WindowServantSP
             new messageSystemValue { value = "no", hint = "稍后" });
     }
 
+    /// <summary>
+    /// 「发现新版本」弹窗（用户 2026-10-09 定稿）。由
+    /// <see cref="ClientSelfUpdate"/> 在「启动静默检查」发现远端版本 ≠ 本地版本时调用
+    /// —— 参照 ygopro2 的「发现 xxx，是否前往更新」。
+    ///
+    /// 走本类现成的 <see cref="Servant.RMSshow_yesOrNo"/> / <see cref="ES_RMS"/> 一处出口，
+    /// 与「资源更新」菜单里的 <c>CLIENT_UPDATE_PAGE</c> 是**姊妹项**（那条是"先检查再问"，
+    /// 本条是"检查已完成、只问去不去"）。
+    /// ⛔ 不在这里判「有没有新版」：判据只有 <see cref="ClientSelfUpdate"/> 那一处
+    ///   （`VersionsEqual`），重复一份就会两处漂移。
+    /// </summary>
+    public void ShowClientUpdateNotify(string remoteVersion, string localVersion)
+    {
+        QuickTestTrace.Log("clientupdate", "notify popup remote=" + remoteVersion
+            + " local=" + localVersion);
+        RMSshow_yesOrNo(
+            "CLIENT_UPDATE_NOTIFY",
+            "发现新版本 v" + remoteVersion + "（当前 v" + localVersion + "），是否前往更新？\n"
+            + "（下载页：" + ClientSelfUpdate.UpdatePageUrl() + "）",
+            new messageSystemValue { value = "yes", hint = "前往更新" },
+            new messageSystemValue { value = "no", hint = "稍后" });
+    }
+
     public override void ES_RMS(string hashCode, List<messageSystemValue> result)
     {
         base.ES_RMS(hashCode, result);
 
         switch (hashCode)
         {
+            case "CLIENT_UPDATE_NOTIFY": // 启动静默检查发现新版 → 弹窗问是否前往下载页
+                if (result[0].value == "yes")
+                {
+                    ClientSelfUpdate.OpenDownloadPage();
+                }
+                else
+                {
+                    Program.PrintToChat("已暂缓 —— 主菜单「资源更新」里可随时前往下载。");
+                }
+                break;
             case "RD_UPDATE_CHOICE": // 「资源更新」按钮弹出的选择窗口
                 if (result[0].value == "folder")
                 {
@@ -3696,7 +3729,7 @@ public class Menu : WindowServantSP
                     }
                 }
             }
-            catch (Exception e)
+            catch (Exception)
             {
                 // Debug.Log(e);
             }
@@ -3709,7 +3742,7 @@ public class Menu : WindowServantSP
                     File.Delete("commamd.shell");
                 }
             }
-            catch (Exception e)
+            catch (Exception)
             {
                 // UnityEngine.Debug.Log(e);
             }

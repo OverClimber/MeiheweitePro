@@ -154,7 +154,6 @@ public class GameTextureManager
         public long code;
         public bool pCard = false;
         public float k = 1;
-        //public bool autoMade = false;
         public byte[] data = null;
         public float[, ,] hashed_data = null;
         public Texture2D u_data = null;
@@ -549,37 +548,6 @@ public class GameTextureManager
 
     private static void caculateK(PictureResource pic)
     {
-        //int width = pic.hashed_data.GetLength(0);
-        //int height = pic.hashed_data.GetLength(1);
-        //int left = 0;
-        //int right = width;
-        //if (width > height)
-        //{
-        //    left = (width - height) / 2;
-        //    right = width - left;
-        //}
-        //int all = 0;
-        //for (int h = 0; h < height; h++)
-        //{
-        //    for (int w = left; w < right; w++)
-        //    {
-        //        if (pic.hashed_data[w, h, 3] > 0.05f)
-        //        {
-        //            all += 1;
-        //        }
-        //    }
-        //}
-        //float result = ((float)all) / (((float)height) * ((float)(height)));
-        //pic.k = result + 0.4f;
-        //if (pic.k > 1)
-        //{
-        //    pic.k = 1f;
-        //}
-        //if (pic.k < 0)
-        //{
-        //    pic.k = 0.1f;
-        //}
-
         int width = pic.hashed_data.GetLength(0);
         int height = pic.hashed_data.GetLength(1);
         int h = 0;

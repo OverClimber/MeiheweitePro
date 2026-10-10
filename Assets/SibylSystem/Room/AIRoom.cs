@@ -9,7 +9,6 @@ public class AIRoom : WindowServantSP
 {
     #region ui
     UIselectableList superScrollView = null;
-    string sort = "sortByTimeDeck";
     System.Diagnostics.Process serverProcess;
     System.Diagnostics.Process botProcess;
 
@@ -620,8 +619,6 @@ public class AIRoom : WindowServantSP
 
     #endregion
 
-    PrecyOcg precy;
-
     /// <summary>最近一次人机开局的随机种子（见 launch 里的说明）。</summary>
     public static uint lastSeed = 0;
 
@@ -1109,24 +1106,26 @@ public static class QuickTestTrace
 
     private static string fileName = null;
     private static int enabled = -1;   // -1 未知 / 0 关 / 1 开
-    private static bool dirReady = false;
+    // （原 dirReady latch 已删：见 LogPath 注释 —— 一次性成功 latch 会把「cwd 还没设好时
+    //   建错位置/建失败」固化成永久静默。）
 
     /// <summary>
     /// 把排查用的文件/开关名解析成 log/ 下的路径，并保证目录存在。
     /// 开关文件（qt_debug.on 等）也在这里读，所以调试时把它们放进 log/ 即可。
+    /// ⛔ 这里【不能】用「成功了就 latch」的写法（2026-10-07 真机教训）：移动端第一次调用
+    ///   可能发生在 AndroidBoot 设置 cwd 之前 ⇒ CreateDirectory("log") 建到错误的 cwd 下
+    ///   或直接失败；latch 之后 cwd 对了也永不重试 ⇒ AppendAllText 全部静默失败，
+    ///   真机上「人机为什么开不了」的第一取证通道整条断掉（实测复现过）。
+    ///   每次都幂等建一次（对已存在目录是廉价调用），失败也不 latch —— 下次 cwd 对了自然建对。
     /// </summary>
     public static string LogPath(string name)
     {
-        if (!dirReady)
+        try
         {
-            try
-            {
-                System.IO.Directory.CreateDirectory(Dir);
-            }
-            catch (System.Exception)
-            {
-            }
-            dirReady = true;
+            System.IO.Directory.CreateDirectory(Dir);
+        }
+        catch (System.Exception)
+        {
         }
         return Dir + "/" + name;
     }
@@ -1558,27 +1557,7 @@ public static class QuickTestTrace
     /// <summary>包体摘要，用于跨进程/跨次运行比对同一条消息流是否一致。</summary>
     public static string Hash(byte[] data)
     {
-        if (data == null)
-        {
-            return "-";
-        }
-        try
-        {
-            using (System.Security.Cryptography.SHA1 sha = System.Security.Cryptography.SHA1.Create())
-            {
-                byte[] h = sha.ComputeHash(data);
-                System.Text.StringBuilder sb = new System.Text.StringBuilder(12);
-                for (int i = 0; i < 6; i++)
-                {
-                    sb.Append(h[i].ToString("x2"));
-                }
-                return sb.ToString();
-            }
-        }
-        catch (System.Exception)
-        {
-            return "-";
-        }
+        return DuelTimeline.Hash(data);
     }
 
     /// <summary>短包体的十六进制明细，用来逐字节比对（撤回重建时的校验也靠这个）。</summary>

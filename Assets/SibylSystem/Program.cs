@@ -246,8 +246,6 @@ public class Program : MonoBehaviour
 
     public static float transparency = 0;
 
-    //public static bool YGOPro1 = true;
-
     public static float getVerticalTransparency()
     {
         if (I().setting.setting.closeUp.value == false)
@@ -1559,21 +1557,6 @@ public class Program : MonoBehaviour
         }
     }
 
-    //public static void shiftCameraPan(Camera camera, bool enabled)
-    //{
-    //    cameraPaning = enabled;
-    //    PanWithMouse panWithMouse = camera.gameObject.GetComponent<PanWithMouse>();
-    //    if (panWithMouse == null)
-    //    {
-    //        panWithMouse = camera.gameObject.AddComponent<PanWithMouse>();
-    //    }
-    //    panWithMouse.enabled = enabled;
-    //    if (enabled == false)
-    //    {
-    //        iTween.RotateTo(camera.gameObject, new Vector3(60, 0, 0), 0.6f);
-    //    }
-    //}
-
     /// <summary>
     /// 3D 相机视口的**唯一真源**：上一次 <see cref="reMoveCam"/>（或
     /// <see cref="CamViewportFull"/>）请求的**屏幕居中点**。
@@ -2134,6 +2117,18 @@ public class Program : MonoBehaviour
         InputGetMouseButtonDown_1 = Input.GetMouseButtonDown(1);
         InputGetMouseButtonUp_1 = Input.GetMouseButtonUp(1);
         InputEnterDown = Input.GetKeyDown(KeyCode.Return);
+        // ── 「空格键锁定卡牌简介」（需求 2026-10-09 第 2 条）──────────────────
+        // 这里只做**取键 + 派发**，语义全在 CardDescLock（含「文本输入框里空格是正常字符」的
+        // 闸门、场景档位闸门、以及「按在无 UI 处 = 解除」）。
+        // ⛔ 派发点**必须**是每帧一次的这里，不能放进 Servant.Update()：那是「每个 servant
+        //   各跑一遍」，一次按键会被处理 N 次 —— 锁定会被自己立刻切回去。
+        // 空格是全项目**唯一**没有游戏绑定的键（左/右/中键与 Tab 都已被占，见 CardDescLock
+        // 的头注）；pointedGameObject 在同一帧更早那段射线里已经算好。
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            CardDescLock.OnSpacePressed();
+        }
+        CardDescLock.Tick();
         InputGetMouseButton_0 = Input.GetMouseButton(0);
         for (int i = 0; i < servants.Count; i++)
         {
@@ -2141,6 +2136,10 @@ public class Program : MonoBehaviour
                 ? "null" : servants[i].GetType().Name) + "（进入）");
             servants[i].Update();
         }
+        // 帧尾再补一次「把被锁的简介抢回面板」：必须排在 servant 段**之后** ——
+        // 决斗里点空白处（Ocgcore.ES_mouseUpEmpty 收起面板）与卡换位置（gameCard.set_data
+        // 重推资料）都发生在 servant 段里，只在帧头补的话会看到一帧「别的东西」。
+        CardDescLock.LateTick();
         TcpHelper.preFrameFunction();
         // AI 对局的看门狗：子进程崩了 / 长时间没包时把玩家从卡死的对局里放出来。
         if (aiRoom != null)
@@ -2190,8 +2189,6 @@ public class Program : MonoBehaviour
     {
         preWid = Screen.width;
         preheight = Screen.height;
-        //if (setting != null)
-        //    setting.setScreenSizeValue();
         Program.notGo(fixScreenProblems);
         Program.go(500, fixScreenProblems);
     }
@@ -2278,7 +2275,7 @@ public class Program : MonoBehaviour
         {
             TcpHelper.tcpClient.Close();
         }
-        catch (System.Exception e)
+        catch (System.Exception)
         {
             //adeUnityEngine.Debug.Log(e);
         }

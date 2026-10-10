@@ -221,6 +221,29 @@ public class VirtualScrollView
         RefreshVisible();
     }
 
+    /// <summary>
+    /// 面板可视区尺寸/裁剪区变过之后**重算滚动几何**（幂等）。
+    ///
+    /// <para>本方法是对上游的**唯一增补**：上游的 <c>ScrollRange</c>/<c>TopOffset</c> 是
+    /// **每次现算**的属性（不像旧 <c>SuperScrollView</c> 那样在 <c>install()</c> 里把
+    /// <c>magicNumber</c> 算死），所以尺寸一变本来就不怕；但「尺寸变了」这件事需要一个**入口**
+    /// 去触发一次重算 —— 否则要等下一次 <c>clipMove</c>/滚轮才生效，那一帧里列表上部留白。</para>
+    ///
+    /// <para>保留同名同义的公开入口的另一个理由：本工程检索窗的详情版排版
+    /// （<c>CardSearchWindow.LayoutDetailRows</c>）在改完 <c>panel_</c> 锚点后调它 ⇒
+    /// 消费者一个字都不用改。</para>
+    ///
+    /// <para>另有一条兜底：<see cref="RefreshVisible"/> 自己会比对
+    /// <c>panel.baseClipRegion</c> 并在变化时 <see cref="MoveTo"/> —— 即使这里取到的
+    /// <c>baseClipRegion</c> 还是旧值，稍后 NGUI 更新裁剪区触发 <c>onClipMove</c> 时也会自己纠正。</para>
+    /// </summary>
+    public void Refit()
+    {
+        lastClipRegion = panel.baseClipRegion;
+        MoveTo(scrollBar.value);
+        RefreshVisible();
+    }
+
     private void StopMovement()
     {
         scrollView.currentMomentum = Vector3.zero;

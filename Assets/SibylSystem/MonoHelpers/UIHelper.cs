@@ -878,24 +878,6 @@ public static class UIHelper
         {
             btn.gameObject.transform.localScale = new Vector3(0, 0, 0);
         }
-        //try
-        //{
-        //    BoxCollider boxCollider = btn.gameObject.GetComponentInChildren<BoxCollider>();
-        //    UILabel label = btn.gameObject.GetComponentInChildren<UILabel>();
-        //    label.text = hint;
-        //    boxCollider.enabled = enabled;
-        //    if (enabled)
-        //    {
-        //        label.color = Color.white;
-        //    }
-        //    else
-        //    {
-        //        label.color = Color.gray;
-        //    }
-        //}
-        //catch (Exception)   
-        //{
-        //}
     }
 
     internal static void shiftUIToggle(UIToggle tog, bool canClick,bool canChange, string hint)      
@@ -1066,52 +1048,6 @@ public static class UIHelper
         }
         return res;
     }
-
-    //internal static string getGPSstringPosition(GPS p1) 
-    //{
-    //    string res = "";
-    //    if ((p1.location & (UInt32)CardLocation.Overlay) > 0)
-    //    {
-    //        res += InterString.Get("(被叠放)");
-    //    }
-    //    else
-    //    {
-    //        if ((p1.position & (UInt32)CardPosition.FaceUpAttack) > 0)
-    //        {
-    //            res += InterString.Get("(表侧攻击)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.FaceUp_DEFENSE) > 0)
-    //        {
-    //            res += InterString.Get("(表侧守备)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.FaceDownAttack) > 0)
-    //        {
-    //            res += InterString.Get("(里侧攻击)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.FaceDown_DEFENSE) > 0)
-    //        {
-    //            res += InterString.Get("(里侧守备)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.Attack) > 0)
-    //        {
-    //            res += InterString.Get("(攻击)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.POS_DEFENSE) > 0)
-    //        {
-    //            res += InterString.Get("(守备)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.FaceUp) > 0)
-    //        {
-    //            res += InterString.Get("(表侧)");
-    //        }
-    //        else if ((p1.position & (UInt32)CardPosition.POS_DEFENSE) > 0)
-    //        {
-    //            res += InterString.Get("(里侧)");
-    //        }
-    //    }
-
-    //    return res;
-    //}
 
     internal static string getGPSstringName(gameCard card, bool green = false)
     {

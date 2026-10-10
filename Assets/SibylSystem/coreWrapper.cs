@@ -15,16 +15,6 @@ namespace Percy
         public List<int> Extra = new List<int>();
         public List<int> Side = new List<int>();
     }
-    class Package
-    {
-        public int Fuction = 0;
-        public BinaryMaster Data = null;
-        public Package()
-        {
-            Fuction = (int)0;
-            Data = new BinaryMaster();
-        }
-    }
     class BinaryMaster
     {
         MemoryStream memstream = null;
@@ -324,7 +314,6 @@ namespace Percy
     {
         #region DoNotCareAboutThis
 
-        //public
         public delegate CardData cardHandler(long code);
         public delegate ScriptData scriptHandler(string name);
         public delegate void chatHandler(string str);
@@ -415,8 +404,6 @@ namespace Percy
             (new Thread(Process)).Start();
         }
 
-        //private
-
         private IntPtr _buffer = Marshal.AllocHGlobal(4096);
 
         private IntPtr duel = default(IntPtr);
@@ -494,7 +481,7 @@ namespace Percy
                     }
                 }
             }
-            catch (Exception e)
+            catch (Exception)
             {
             }
             return deck;
@@ -701,12 +688,6 @@ namespace Percy
                         break;
                     }
                 }
-                //else
-                //{
-                //    log("len == 0");
-                //    end = true;
-                //    break;
-                //}
             }
         }
 
@@ -742,7 +723,7 @@ namespace Percy
                                 currentWriter.Write(readed);
                             }
                         }
-                        catch (Exception e)
+                        catch (Exception)
                         {
                         }
                     }

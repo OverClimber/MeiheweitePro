@@ -8,7 +8,7 @@ using UnityEngine;
 /// 复用的是卡组编辑器那张检索面板 prefab（<see cref="Program.new_ui_search"/>）：
 /// 输入框 / 列表 / 滚动条 / 搜索钮都是现成的，这里只做四件事 ——
 /// ① 摆到屏幕右侧（左侧留给卡牌说明面板，两块不打架）；
-/// ② 把 <see cref="SuperScrollView"/> 挂上 <c>panel_</c>/<c>bar_</c>，条目用
+/// ② 把 <see cref="VirtualScrollView"/> 挂上 <c>panel_</c>/<c>bar_</c>，条目用
 ///    <see cref="Program.new_ui_cardOnSearchList"/>（和编辑器里一模一样）；
 /// ③ 悬停条目 → 左侧说明面板跟着换（与卡组编辑器同一手感）；
 /// ④ 输入框左端补一颗「返回上一级」钮，见 <see cref="goBack"/>。
@@ -27,7 +27,7 @@ using UnityEngine;
 ///
 /// 性能（需求 6）：窗口在启动时建一次、之后只移动显隐；检索走的是
 /// <see cref="YGOSharp.CardsManager.searchAdvanced"/> 一次全池扫描（纯文本包含，无正则），
-/// 结果条目复用 SuperScrollView 的可见区懒创建 —— 一万张命中也只实例化看得见的十几行。
+/// 结果条目复用 VirtualScrollView 的可见区懒创建 —— 一万张命中也只实例化看得见的十几行。
 /// 返回上一级只是个 List（存条件两个字段），没有任何每帧成本。
 /// </summary>
 public class CardSearchWindow : Servant
@@ -100,7 +100,7 @@ public class CardSearchWindow : Servant
     UIInput input;
     UIPanel panel;
     UIScrollBar bar;
-    SuperScrollView scroll;
+    VirtualScrollView scroll;
     UITexture back;
     GameObject backButton;
 
@@ -407,7 +407,7 @@ public class CardSearchWindow : Servant
         }
         if (panel != null && bar != null)
         {
-            scroll = new SuperScrollView(panel, bar, itemOnListProducer, 86);
+            scroll = new VirtualScrollView(panel, bar, itemOnListProducer, 86, ItemBinder);
         }
         // ⚠ 顺序要紧：返回钮是**克隆 search_ 造的**，所以必须先建钮、再把放大镜藏掉；
         //   反过来就克隆出一个藏在状态下的钮（克隆体默认继承源的 activeSelf）。
@@ -1087,6 +1087,16 @@ public class CardSearchWindow : Servant
 
     /// <summary>验收用：把本窗根节点交出去，好让探针在进程内直接量那颗「返回上一级」的状态。</summary>
     public GameObject ProbeWindowObject { get { return win; } }
+
+    /// <summary>
+    /// 本窗根节点（<c>new_search_remaster</c> 的克隆体）＝检索列表的容器。
+    ///
+    /// <para>消费方是 <see cref="CardDescLock"/>：「空格锁简介」要判断**这块检索列表还开着吗**
+    /// —— 锁在检索列表里的卡，滚出裁剪区/被重新检索挤掉都**不算解锁**，只有整块列表下来了
+    /// 才解锁（见 <c>CardDescLock.lockedSearchRoot</c> 头注）。收窗是把窗挪到屏幕外，
+    /// <c>activeInHierarchy</c> 恒为真，所以它比的是 <see cref="Servant.isShowed"/>。</para>
+    /// </summary>
+    public GameObject WindowRoot { get { return win; } }
 
     /// <summary>
     /// 验收用：在返回钮旁边生成一个**变体**（<paramref name="dx"/> = 向左偏移 px，
@@ -2012,14 +2022,19 @@ public class CardSearchWindow : Servant
         return exact;
     }
 
+    /// <summary>
+    /// 行工厂：**只造壳、不填值**。
+    ///
+    /// <para>⛔ 为什么必须把「造行」与「填值」拆开：<c>VirtualScrollView</c> 是**行池**语义
+    /// （与 YGOPro2 原生同源）—— 它把行对象**反复复用**去装别的卡，只要求「可见的那十几行」
+    /// 存在。所以一切跟「这一行现在装哪张卡」有关的东西都必须放进
+    /// <see cref="ItemBinder"/>，留在这里的只能是「这一行永远不变」的结构活：
+    /// 克隆行模板、挂 <c>cardPicLoader</c>、抓住 <c>pic_</c> 贴图与禁卡图标这两个引用。</para>
+    /// </summary>
     GameObject itemOnListProducer(string[] Args)
     {
         GameObject rv = create(Program.I().new_ui_cardOnSearchList, Vector3.zero, Vector3.zero, false, Program.ui_back_ground_2d);
-        UIHelper.getRealEventGameObject(rv).name = Args[0];
-        UIHelper.trySetLableText(rv, Args[2]);
         cardPicLoader loader = UIHelper.getRealEventGameObject(rv).AddComponent<cardPicLoader>();
-        loader.code = int.Parse(Args[0]);
-        loader.data = YGOSharp.CardsManager.Get(int.Parse(Args[0]));
         loader.uiTexture = UIHelper.getByName<UITexture>(rv, "pic_");
         loader.ico = UIHelper.getByName<ban_icon>(rv);
         if (loader.ico != null)
@@ -2027,6 +2042,43 @@ public class CardSearchWindow : Servant
             loader.ico.show(3);
         }
         return rv;
+    }
+
+    /// <summary>
+    /// 行绑定：这一行每次被（重新）派给某个检索结果时调用 —— **装卡相关的活全在这儿**。
+    ///
+    /// <para>⚠ 必须是「先复位再填」而不是「填一次就算」：行池把一行从 A 卡改派给 B 卡时，
+    /// <c>cardPicLoader.Update</c> 是靠 <c>loaded_code != code</c> 才去换图的，
+    /// 所以这里要把 <c>loaded_code</c>（经 <see cref="cardPicLoader.reCode"/>）与
+    /// <c>loaded_banlist</c> 复位、并把旧贴图清成 <c>null</c> —— 否则在新图加载出来之前，
+    /// 这一格会**继续显示上一张卡**（原生那边的 binder 也是这么清的）。</para>
+    ///
+    /// <para>用 <see cref="cardPicLoader.reCode"/> 而不是直接写 <c>code</c>，是为了顺手处理
+    /// 「被空格锁住的那一条被改派去装别的卡」：它会通知 <c>CardDescLock</c> 把锁放掉，
+    /// 免得「行已经换成别的卡了、左侧简介还被钉在原来那张上」。</para>
+    /// </summary>
+    void ItemBinder(GameObject row, string[] Args)
+    {
+        GameObject eventGo = UIHelper.getRealEventGameObject(row);
+        cardPicLoader loader = eventGo.GetComponent<cardPicLoader>();
+        if (loader == null)
+        {
+            return;
+        }
+        int code = int.Parse(Args[0]);
+        eventGo.name = Args[0];
+        UIHelper.trySetLableText(row, Args[2]);
+        loader.reCode(code);
+        loader.data = YGOSharp.CardsManager.Get(code);
+        if (loader.uiTexture != null)
+        {
+            loader.uiTexture.mainTexture = null;
+        }
+        loader.loaded_banlist = null;
+        if (loader.ico != null)
+        {
+            loader.ico.show(3);
+        }
     }
 
     public override void ES_HoverOverGameObject(GameObject gameObject)
@@ -4236,10 +4288,10 @@ public class CardSearchWindow : Servant
     /// <item><c>Panel2</c>（标题）：top −34、bottom −54 —— 正好落在按钮下缘 30.5 之下、
     ///     留 3.5px 缝；prefab 原值是 −31/−51，这里整体下移 3px 让开按钮；</item>
     /// <item><c>panel_</c>（列表）：top −58 —— 紧接标题下缘；</item>
-    /// <item><c>bar_</c>：top −57 —— 与列表同一条上缘。</item>
+    /// <item><c>bar_</c>：<b>不动</b>（2026-10-10 第七轮起，见方法体内说明）。</item>
     /// </list>
     ///
-    /// <para>⛔ 改完必须 <see cref="SuperScrollView.Refit"/>：滚动几何是按旧的
+    /// <para>⛔ 改完必须 <see cref="VirtualScrollView.Refit"/>：滚动几何是按旧的
     /// <c>GetViewSize</c> 算死的，不重算会滚不到底。</para>
     /// <para>幂等：绝对值是**赋值**不是累加，重复执行结果不变。</para>
     /// </summary>
@@ -4257,21 +4309,26 @@ public class CardSearchWindow : Servant
             panel.topAnchor.absolute = -58;
             panel.ResetAndUpdateAnchors();
         }
-        if (bar != null)
-        {
-            // ⛔ UIScrollBar 不是 UIRect，锚点长在它的子 widget 上（底槽/前景两块 sprite）；
-            //   逐个把「锚着 under_」的 widget 的上缘抬到列表同一条线上。
-            UIWidget[] barParts = bar.GetComponentsInChildren<UIWidget>(true);
-            foreach (UIWidget w in barParts)
-            {
-                if (w == null || w.topAnchor == null || w.topAnchor.target == null)
-                {
-                    continue;
-                }
-                w.topAnchor.absolute = -57;
-                w.ResetAndUpdateAnchors();
-            }
-        }
+        // ⛔⛔ bar_（轨道）**不再重排** —— 保持 prefab 原生锚定（new_search_remaster：
+        //   top=−33 / bottom=3，锚 under_）。历史教训两段：
+        //
+        //   ① 第六轮之前：这里把 bar_ 子树里「锚着 under_」的 widget 逐个硬写 top=−57，
+        //      本意是「轨道与列表同一条上缘」；但循环只判 `topAnchor.target != null`，
+        //      把**滑块 Foreground**（四个锚点目标全是 bar_）也一起写了 —— 滑块上缘被从
+        //      「轨道顶+5」推到「轨道顶+57」，轨道顶部永远空出一段（用户第六轮：
+        //      「滑动条上面始终有一段未知的空格」）。
+        //
+        //   ② 第七轮：加上目标判据（只动锚 under_ 的）后空格修掉了，但轨道顶仍被压在
+        //      −57 —— 而同 prefab 的检索窗（编辑器侧）轨道顶是原生值 −33 ⇒ 弹出框滑条
+        //      比原生**低 24px**（用户第七轮：「弹出框的滑动条布局要参照原生的，现在会
+        //      显得低了原生滑动条一段」）。原生形态本就是**轨道比列表长**：原生
+        //      remaster prefab 里 bar_ top=−73 / panel_ top=−90，轨道上缘伸进头部区域
+        //      17px；详情模式的头部是按钮排（顶缘下 5.5~30.5）+ 标题行（−34~−54），
+        //      轨道顶 −33 正好落在按钮排下缘之下 2.5px，与检索窗观感一致。
+        //      ⇒ 结论：轨道布局**一处事实来源 = prefab**，详情模式不再碰它。
+        //
+        //   （UIScrollBar 不是 UIRect、锚点长在子 widget 上 —— 这条几何事实仍成立，
+        //    只是现在谁都不需要改它。）
         if (scroll != null)
         {
             scroll.Refit();

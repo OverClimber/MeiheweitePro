@@ -39,9 +39,25 @@ public class DeckManager : ServantWithCardDescription
 
     UIInput UIInput_search;
 
+    /// <summary>
+    /// 「卡组界面自动启用输入」——进卡组编辑器（或点一次「检索」）后，要不要**自动**把焦点抢到
+    /// 右上那个关键字输入框（<c>UIInput.isSelected = true</c>）。
+    ///
+    /// <para>用户 2026-10-10 第 2 条：「进入卡组编辑界面时貌似会自动开启往输入框里输入，要求做成
+    /// 配置项『卡组界面自动启用输入』且默认关闭」。默认关 ⇒ 不再自动取焦，玩家随后按的键
+    /// （方向键/WASD/回车…）不会再被当成关键字吃进搜索框；想打字**点一下输入框**即可。</para>
+    ///
+    /// <para>真源＝Config 键 <c>deckAutoInput_</c>（设置页「卡组界面自动启用输入」那一行，
+    /// 见 <c>Setting.CreateDeckAutoInputToggle</c>）。⛔ 键名只有这一处，别在别处再抄一份。</para>
+    /// </summary>
+    public static bool AutoInputEnabled
+    {
+        get { return Config.Get("deckAutoInput_", "0") == "1"; }
+    }
+
     UIToggle[] UIToggle_effects = new UIToggle[32];
 
-    SuperScrollView superScrollView = null;
+    VirtualScrollView superScrollView = null;
 
     UIPopupList UIPopupList_banlist;
 
@@ -109,12 +125,13 @@ public class DeckManager : ServantWithCardDescription
         clearAll();
         UIHelper.registEvent(UIPopupList_main.gameObject, onUIPopupList_main);
         UIHelper.registEvent(UIPopupList_second.gameObject, onUIPopupList_second);
-        superScrollView = new SuperScrollView
+        superScrollView = new VirtualScrollView
            (
            UIHelper.getByName<UIPanel>(gameObjectSearch, "panel_"),
            UIHelper.getByName<UIScrollBar>(gameObjectSearch, "bar_"),
            itemOnListProducer,
-           86
+           86,
+           ItemBinder
            );
         Program.go(500, () => {
             List<MonoCardInDeckManager> cs = new List<MonoCardInDeckManager>();
@@ -131,19 +148,51 @@ public class DeckManager : ServantWithCardDescription
 
     }
 
+    /// <summary>
+    /// 行工厂：**只造壳、不填值**（行池会把这个对象反复复用来装别的卡，见 <see cref="ItemBinder"/>）。
+    /// </summary>
     GameObject itemOnListProducer(string[] Args)
     {
         GameObject returnValue = null;
         returnValue = create(Program.I().new_ui_cardOnSearchList, Vector3.zero, Vector3.zero, false, Program.ui_back_ground_2d);
-        UIHelper.getRealEventGameObject(returnValue).name = Args[0];
-        UIHelper.trySetLableText(returnValue, Args[2]);
         cardPicLoader cardPicLoader_ = UIHelper.getRealEventGameObject(returnValue).AddComponent<cardPicLoader>();
-        cardPicLoader_.code = int.Parse(Args[0]);
-        cardPicLoader_.data = YGOSharp.CardsManager.Get(int.Parse(Args[0]));
         cardPicLoader_.uiTexture = UIHelper.getByName<UITexture>(returnValue, "pic_");
         cardPicLoader_.ico = UIHelper.getByName<ban_icon>(returnValue);
-        cardPicLoader_.ico.show(3);
+        if (cardPicLoader_.ico != null)
+        {
+            cardPicLoader_.ico.show(3);
+        }
         return returnValue;
+    }
+
+    /// <summary>
+    /// 行绑定：这一行每次被（重新）派给某个检索结果时调用 —— 装卡相关的活全在这儿
+    /// （与 <c>CardSearchWindow.ItemBinder</c> 同口径：先复位 <c>loaded_code</c>/<c>loaded_banlist</c>
+    /// 并清掉旧贴图，否则改派之后会先显示上一张卡；走 <see cref="cardPicLoader.reCode"/>
+    /// 顺带处理「被锁的那一条被改派」的解锁）。
+    /// </summary>
+    void ItemBinder(GameObject row, string[] Args)
+    {
+        GameObject eventGo = UIHelper.getRealEventGameObject(row);
+        cardPicLoader loader = eventGo.GetComponent<cardPicLoader>();
+        if (loader == null)
+        {
+            return;
+        }
+        int code = int.Parse(Args[0]);
+        eventGo.name = Args[0];
+        UIHelper.trySetLableText(row, Args[2]);
+        loader.reCode(code);
+        loader.data = YGOSharp.CardsManager.Get(code);
+        if (loader.uiTexture != null)
+        {
+            loader.uiTexture.mainTexture = null;
+        }
+        loader.loaded_banlist = null;
+        if (loader.ico != null)
+        {
+            loader.ico.show(3);
+        }
     }
 
     public override void applyHideArrangement()
@@ -860,10 +909,6 @@ public class DeckManager : ServantWithCardDescription
 
     public override void ES_mouseDownEmpty()
     {
-        //if (detailShowed)
-        //{
-        //    hideDetail();
-        //}
     }
 
     void onExitDetail()
@@ -908,7 +953,7 @@ public class DeckManager : ServantWithCardDescription
             UIHelper.getByName<UIInput>(gameObjectDetailedSearch, "year_UP").value = "";
 
         }
-        catch (System.Exception e)
+        catch (System.Exception)
         {
             //UnityEngine.Debug.Log(e);
         }
@@ -1048,8 +1093,6 @@ public class DeckManager : ServantWithCardDescription
 
     int lastRefreshTime = 0;
 
-    string UIInput_searchValueLast = "";
-
     void doSearch()
     {
         superScrollView.toTop();
@@ -1083,7 +1126,11 @@ public class DeckManager : ServantWithCardDescription
                     );
         print(result);
         UIHelper.trySetLableText(gameObjectSearch, "title_", result.Count.ToString());
-        UIInput_search.isSelected = true;
+        // 「卡组界面自动启用输入」关着时**不**自动取焦（用户 2026-10-10 第 2 条，见 AutoInputEnabled）。
+        if (AutoInputEnabled)
+        {
+            UIInput_search.isSelected = true;
+        }
         // 「编辑器是不是只在搜当前模式的池」是 RD 线的核心判据之一，光看界面数不出来 ——
         // 这里把池、关键字、命中数与头几张卡一起落盘（验收脚本按这条判，别去截图数卡）。
         if (QuickTestTrace.Enabled)
@@ -2166,7 +2213,7 @@ public class DeckManager : ServantWithCardDescription
                 }
             }
         }
-        catch (Exception e)
+        catch (Exception)
         {
         }
     }
@@ -2604,7 +2651,13 @@ public class DeckManager : ServantWithCardDescription
         else
         {
             UIInput_search.value = "";
-            UIInput_search.isSelected = true;
+            // ⛔ 这里就是用户报的「一进卡组编辑器就自动开始往输入框里打字」的入口：
+            //   原来自动 isSelected = true 抢焦点。现在由「卡组界面自动启用输入」压着，
+            //   默认**不**取焦（见 AutoInputEnabled）；玩家点一下输入框照样能打。
+            if (AutoInputEnabled)
+            {
+                UIInput_search.isSelected = true;
+            }
         }
     }
 }

@@ -63,11 +63,6 @@ public class gameCard : OCGobject
 
     public bool isMinBlockMode = true;
 
-    //public bool getIfInMinMode()
-    //{
-    //    return isMinBlockMode && (ES_excited_unsafe_should_not_be_changed_dont_touch_this==false);
-    //}
-
     public bool cookie_cared = false;
 
     /// <summary>
@@ -115,8 +110,6 @@ public class gameCard : OCGobject
 
     ParticleSystem game_object_monster_cloude_ParticleSystem = null;
 
-    //public int ability = 2500;
-
     GameObject obj_number = null;
 
     BoxCollider VerticleCollider = null;
@@ -155,6 +148,14 @@ public class gameCard : OCGobject
         chainKuang = insKuang(Program.I().New_chainKuang);
         selectKuang.SetActive(false);
         chainKuang.SetActive(false);
+        // 「空格键锁定卡牌简介」的高亮框（需求 2026-10-09 第 2 条）：
+        // ⛔ 不复用上面的紫框 —— 那是内核选择流程的「已选」，与本功能无关（见字段注释）。
+        // 框自身在构造期造好即隐藏，显隐由每帧的 RefreshFunction_decoration 决定。
+        // ⚠ 每张卡都造一个（牌桌上一局最多几十张）—— 与 selectKuang/chainKuang 同样口径，
+        //   不做什么共享池：共享会让「同一帧里 A 的锁被 B 的状态顶掉」这类错变得难查。
+        lockMark = CardDescLock.NewLockMark(gameObject_face.transform);
+        // 显隐由 `RefreshFunction_decoration` 每帧按「本卡是不是被锁的那张、且卡面内容可见
+        // （`data.Id != 0`）」决定 —— 判据与理由都在那里的头注，别在这里再塞区域白名单。
         gameObject.SetActive(false);
 
     }
@@ -271,6 +272,20 @@ public class gameCard : OCGobject
     FlashingController[] SpSummonFlash, ActiveFlash, SelectFlash;
 
     GameObject selectKuang, chainKuang;
+
+    /// <summary>
+    /// 「空格键锁定卡牌简介」的高亮标记（需求 2026-10-09；状态机与外观都在 <see cref="CardDescLock"/>）。
+    /// 第二版外观（用户口径「选中不用现在这个框了，改成贴一层白色半透明的锁状图标，边缘也围起来
+    /// 一圈白」）＝ 一圈**白框** + 卡面正中一枚**白色半透明锁图标**（见 <c>CardDescLock.NewLockMark</c>）。
+    ///
+    /// <para>与 selectKuang / chainKuang **同族但各自独立**：那两个是内核选择流程的状态
+    /// （「这张卡正被选」/「这张卡在连锁里」），本标记只表示「这张卡的简介被玩家钉住了」。
+    /// 共用同一个实例会出现「选了卡但简介没锁」也点灯、反之亦然 —— 语义必须分开。</para>
+    ///
+    /// <para>构造期就建好（<see cref="CardDescLock.NewLockMark"/>），之后每帧按锁状态显隐
+    /// （见 <see cref="RefreshFunction_decoration"/>）。</para>
+    /// </summary>
+    GameObject lockMark;
 
     FlashingController MouseFlash;
 
@@ -445,6 +460,38 @@ public class gameCard : OCGobject
             }
 
         }
+        // 「空格键锁定卡牌简介」的高亮（需求 2026-10-09）：**独立于**上面那个
+        // currentKuang 状态机 —— 决策源在 CardDescLock，本卡只负责「我被锁了就点亮」。
+        // ⛔ 不能塞进上面那个 `if (currentKuangPre!=currentKuang)`：那是**边沿触发**
+        //   （只在状态变化那一帧跑），而锁会在别处被改（按空格 / 切场景 / 卡被回收），
+        //   与本卡的 currentKuang 无关 ⇒ 边沿触发会漏掉「锁变了但本卡状态没变」的那些帧。
+        // ⚠ 判据自带 id：gameCard 是池化的（同一实例会被复用去装别的卡），
+        //   只比 gameObject 不比 id 的话，换卡之后白框会赖在旧卡上。
+        if (lockMark != null)
+        {
+            // 「锁了就该亮」的**唯一判据**：本卡此刻是不是被锁的那一张，且它的**卡面内容对玩家可见**。
+            //
+            // ⛔⛔ 判据是 `data.Id`，**不是** `p.position` 的 FaceUp/FaceDown 位。
+            //   本工程决定「`card/face` 这个 quad 上画的是卡图还是卡背」的只有 `card_picture_handler()`
+            //   那一行：它按 `GameTextureManager.get(data.Id, card_picture, 回落卡背)` 取图 ——
+            //   `data.Id == 0` 取不到卡图、拿到的是 myBack/opBack；同一函数随后还有显式分支
+            //   `if (data.Id == 0) …face… = myBack/opBack`。⇒ **`data.Id != 0` ⇔ 这张卡的卡面内容
+            //   对玩家可见**，与「简介面板能不能显示它」也是同一件事（`showMeLeft` 喂的就是同一份
+            //   data）。`p.position` 的 FaceUp 位在这条路径上从不参与 —— 拿它当判据会误伤**手牌**
+            //   （手牌 position 不含 FaceUp 位，可它明明是玩家看得见卡面的那张；用户 2026-10-10
+            //   实测「手牌锁了没图像」就是它）。
+            //
+            // 自带 id 匹配（CardDescLock.FrameOn）同时兜住三件事：
+            //   ① 卡池化复用后白框不赖在旧卡上（换卡后 data.Id 变了）；
+            //   ② 卡被换成未知（data.Id→0，如被盖回卡组 / 变成对手手牌）时标记**自动熄**
+            //      —— 正是「不是所有区域都该贴」这条，无需再手写区域白名单；
+            //   ③ 解锁时立即熄。
+            bool lockOn = CardDescLock.FrameOn(gameObject, data != null ? data.Id : -1);
+            if (lockMark.activeSelf != lockOn)
+            {
+                lockMark.SetActive(lockOn);
+            }
+        }
         if (currentFlashPre != currentFlash)
         {
             currentFlashPre = currentFlash;
@@ -549,6 +596,34 @@ public class gameCard : OCGobject
     public bool ES_pointed_raw()
     {
         return gameObject_event_main != null && Program.pointedGameObject == gameObject_event_main;
+    }
+
+    /// <summary>
+    /// 光标是否正指在这张卡的**任一交互面**上（事件碰撞盒 / 卡底 / 立绘）—— 纯几何，不看可点性。
+    /// 给「空格键锁定卡牌简介」（<see cref="CardDescLock.OnSpacePressed"/>）用。
+    ///
+    /// <para>⛔ 不能改用 <see cref="ES_pointed_raw"/>：悬停到卡上会进入 excited 态，那一刻命中面
+    /// 常常已经从 `card/event` 换成摊开的 `card_bed`、或极大怪兽的立绘，
+    /// 只认 event 会让「明明指着这张卡却锁不上」。</para>
+    ///
+    /// <para>⛔ 也**故意不含** <c>buttons</c>：那些操作按钮（召唤/攻击…）浮在卡面之上，
+    /// 指在按钮上按空格应当是「按了那个功能」，不该顺手把简介锁上。</para>
+    /// </summary>
+    public bool ES_pointed_any()
+    {
+        if (gameObject_event_main != null && Program.pointedGameObject == gameObject_event_main)
+        {
+            return true;
+        }
+        if (gameObject_event_card_bed != null && Program.pointedGameObject == gameObject_event_card_bed)
+        {
+            return true;
+        }
+        if (game_object_verticle_drawing != null && Program.pointedGameObject == game_object_verticle_drawing)
+        {
+            return true;
+        }
+        return false;
     }
 
     public void ES_lock(float time)
@@ -920,29 +995,6 @@ public class gameCard : OCGobject
         }
     }
 
-    //float deltaTimeCloseUp=0;
-    //private void ES_excited_handler_close_up_handler()
-    //{
-    //    float faT = 0.25f;
-    //    deltaTimeCloseUp += Time.deltaTime;
-    //    if (deltaTimeCloseUp > faT)
-    //    {
-    //        deltaTimeCloseUp = faT;
-    //    }
-    //    Vector3 screenposition = Program.camera_game_main.WorldToScreenPoint(accurate_position);
-    //    Vector3 worldposition = Camera.main.ScreenToWorldPoint(new Vector3(screenposition.x, screenposition.y, screenposition.z - 10));
-    //    gameObject.transform.position = new Vector3
-    //        (
-    //        iTween.easeOutQuad(accurate_position.x, worldposition.x, deltaTimeCloseUp / faT),
-    //        iTween.easeOutQuad(accurate_position.y, worldposition.y, deltaTimeCloseUp / faT),
-    //        iTween.easeOutQuad(accurate_position.z, worldposition.z, deltaTimeCloseUp / faT)
-    //        );
-    //    if (game_object_verticle_drawing != null)
-    //    {
-    //        card_verticle_drawing_handler();
-    //    }
-    //}
-
     private void ES_excited_handler_close_up_handler()
     {
         // 🔑 「极大怪兽一体化」占用位置期间：本卡（三件之一）**不再自己 close-up** ——
@@ -1134,6 +1186,21 @@ public class gameCard : OCGobject
     void showMeLeft(bool force=false)
     {
         Program.I().cardDescription.setData(data, p.controller == 0 ? GameTextureManager.myBack : GameTextureManager.opBack, tails.managedString, force);
+    }
+
+    /// <summary>
+    /// 「空格键锁定卡牌简介」专用：把本卡资料**强行**推上左侧说明面板 ——
+    /// 就是悬停进入 excited 那一下走的那条路（<see cref="showMeLeft"/> 的 force 版），
+    /// 但**不做**任何动画、按钮浮动、素材外拉。
+    ///
+    /// <para>为什么外部要这个入口：按空格锁卡**不改变悬停对象** ⇒ <c>Servant.Update</c> 里
+    /// 「悬停变了才派发」的那道闸不会开，面板会停在上一张上（用户 2026-10-09 报
+    /// 「空格按下后没有及时切换简介」）。外面若自己拼 def/tails 就等于把
+    /// 「我方背面 <c>myBack</c> / 对方 <c>opBack</c>」这段判断复制一份，容易走偏。</para>
+    /// </summary>
+    public void ShowMeLeftForce()
+    {
+        showMeLeft(true);
     }
 
     public void ES_exit_excited(bool move_to_original_place)
@@ -1674,11 +1741,6 @@ public class gameCard : OCGobject
         }
     }
 
-    //private void bugOfUnity()
-    //{
-    //    this.gameObject.transform.eulerAngles = this.accurate_rotation;
-    //}
-
     public void UA_give_condition(gameCardCondition c)
     {
         if (condition != c || forceRefreshCondition)
@@ -1881,7 +1943,6 @@ public class gameCard : OCGobject
     bool loaded_verticalDrawingReal = false;
     bool loaded_verticalDrawingSingle = false;
     float loaded_verticalDrawingK = 1;
-   // bool picLikeASquare = false;
     int loaded_verticalDrawingNumber = -1;
     int loaded_verticalatk = -1;
     int loaded_verticaldef = -1;
@@ -1958,14 +2019,6 @@ public class gameCard : OCGobject
         else
         {
             float trans = 1f;
-            //if (opMonsterWithBackGroundCard && loaded_verticalDrawingK < 0.9f && ability / loaded_verticalDrawingK > 2600f / 0.9f)  
-            //{
-            //    trans = 0.5f;
-            //}
-            //else
-            //{
-            //    trans = 1f;
-            //}
             trans *= Program.getVerticalTransparency();
             if (trans < 0)
             {
@@ -2202,45 +2255,6 @@ public class gameCard : OCGobject
             }
         }
     }
-
-    //private float caculateBoxWidth()
-    //{
-    //    float colliderWidth = 1f;
-    //    float showscale = 2f + (float)(ability - 1000) / 1000f;
-    //    if (showscale > 4) showscale = 4;
-    //    if (showscale < 2) showscale = 2;
-    //    showscale *= 1.8f / loaded_verticalDrawingK;
-    //    showscale *= k_verticle;
-    //    colliderWidth = 4.3f / showscale;
-    //    return colliderWidth;
-    //}
-
-    //public void caculateAbility()
-    //{
-    //    if (condition== gameCardCondition.verticle_clickable)
-    //    {
-    //        if ((p.position & (UInt32)CardPosition.Attack) > 0)
-    //        {
-    //            ability = data.Attack;
-    //        }
-    //        else
-    //        {
-    //            ability = data.Defense;
-    //        }
-    //    }
-    //    else
-    //    {
-    //        ability = data.Attack;
-    //    }
-    //    if (ability > 3000)
-    //    {
-    //        ability = 3000;
-    //    }
-    //    if (ability < 0)
-    //    {
-    //        ability = 0;
-    //    }
-    //}
 
     #endregion
 
@@ -3556,8 +3570,6 @@ public class gameCard : OCGobject
     {
         public chainMono G;
         public int i;
-        //public Vector3 bornPosition = default(Vector3);
-        //public Vector3 bornAngle = default(Vector3);
     }
 
     public void CS_addChainNumber(int i)

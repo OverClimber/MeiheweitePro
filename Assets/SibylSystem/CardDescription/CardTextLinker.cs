@@ -431,7 +431,6 @@ public static partial class CardTextLinker
                 sb.Append('有');
             }
 
-            bool linked = false;
             int cardId = 0;
             bool isCardName = names != null && names.TryGetValue(inner, out cardId);
             bool isField = IsLinkableField(inner);
@@ -514,7 +513,6 @@ public static partial class CardTextLinker
                 {
                     tailConsumed = true;
                 }
-                linked = true;
             }
             else if (isField)
             {
@@ -529,7 +527,6 @@ public static partial class CardTextLinker
                 {
                     tailConsumed = true;
                 }
-                linked = true;
             }
             else
             {

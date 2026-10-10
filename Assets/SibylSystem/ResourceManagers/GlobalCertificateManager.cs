@@ -30,7 +30,6 @@ public static class GlobalCertificateManager
     )
     {
         // 都是从的官方资源下载，hook 掉不验证证书可以提高下载速度，但是有一定的安全风险
-        // return true;
         // Case 1: 证书本身没有问题，直接通过
         if (sslPolicyErrors == SslPolicyErrors.None)
         {

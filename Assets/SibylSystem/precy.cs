@@ -133,7 +133,6 @@ public class PrecyOcg
 
     Percy.ScriptData scriptHandler(string filename)
     {
-        //string filename = GetScriptFilename(scriptName);
         byte[] content;
         Percy.ScriptData ret;
         ret.buffer = IntPtr.Zero;
