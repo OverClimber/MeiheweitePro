@@ -224,7 +224,7 @@ python devtools/unpack_rd.py --list          # 只列源包内容，不落盘
 `ClientDataUpdater` / `RdDataUpdater` / 超先行下载三套既有机制一律不动。
 
 **实现**：`Assets/SibylSystem/ResourceManagers/ClientSelfUpdate.cs`
-- 版本常量 `ClientVersionText = "1.3"`（与 `Config.ClientVersion` 协议号解耦）。
+- 版本常量 `ClientVersionText = "2.3.1"`（与 `Config.ClientVersion` 协议号解耦；实际值以源码为准）。
 - 版本源 = **候选列表**（Config ini `clientUpdateVersionUrls` 覆盖 → 否则内置默认）：
   ① `https://fastly.jsdelivr.net/gh/OverClimber/MeiheweitePro@main/version.txt`（jsDelivr，首选）
   ② `https://raw.githubusercontent.com/OverClimber/MeiheweitePro/main/version.txt`
@@ -233,7 +233,7 @@ python devtools/unpack_rd.py --list          # 只列源包内容，不落盘
   逐个尝试，首个成功即用；全失败静默（不影响启动）。
 - 复用 `UnityFileDownloader.DownloadFileAsync`（**只调用，不改**）拉文本 → 首行 = 版本串。
 - 比较口径：去 `v` 前缀后**字符串不等即视为有更新**（对齐 mdpro3，不做语义化解析）。
-- 去重：已见版本存 Config ini `lastSeenClientVersion`，同一版本只提示一次。
+- 去重：**无**（2026-10-11 起）。只要版本不等，**每次启动都弹**；原 `lastSeenClientVersion` 去重机制已整条移除。
 - UI：主菜单标题显示 **`MeiheweitePro v1.3`**（`VersionBaseText`，不再暴露上游 2.4.d/1036.2）；
   「资源更新」选择窗新增「检查客户端更新」项 → 检查 + 「打开下载页」按钮（跳夸克）。
 - 下载页：Config ini `clientUpdatePageUrl`，默认 `https://pan.quark.cn/s/d2dd58b3d27e`。

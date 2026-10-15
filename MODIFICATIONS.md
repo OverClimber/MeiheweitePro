@@ -108,3 +108,19 @@
 本仓库即为发布版二进制的对应源码。
 
 **发布包使用者请注意**：如需获取源码，见发布包内 `授权与来源说明.txt` 中给出的地址；若该地址失效，请通过发布渠道索取。
+
+## v2.3 (2026-10-12)
+
+- Accelerated long-history duel undo and replay catch-up.
+- Improved deck card dragging with time-based follow, pointer-based drop projection, row-first snapping, drag cancellation and protection against accidental reorder/removal.
+- Added a Windows push-version controller that changes only the remote Windows version file.
+- Desktop and Android C# checks passed; manual touch and full-duel coverage remain separate.
+
+## v2.3.1 (2026-10-15)
+
+- Fixed equipment cards stuck at stale positions: equipment now re-docks to the equipped monster's slot after undo/return-to-grave edge cases (equipment bug fix, 2026-10-13/14).
+- Card picture cache: absent-picture handling and async picture install hardening (`PictureAbsentCache`, managed pack install).
+- Deck manager: deck auto-input helper behind a config switch (default off); drag geometry refinement (`DeckDragGeometry`).
+- Card script updater: background script refresh pipeline (`CardScriptUpdater`).
+- SZONE predicate and on-field visibility fixes in Ocgcore/gameField/Servant/coreWrapper.
+- Version constants bumped to 2.3.1; release packaging and delta-update tooling updated.

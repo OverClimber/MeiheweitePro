@@ -2555,14 +2555,24 @@ public class Menu : WindowServantSP
                 }
                 else if (choice == "clientSelf")
                 {
-                    // 客户端本体版本检查（v1.3）。检查完由 ClientSelfUpdate 的 Sink 处理；
-                    // 「有新版」时 Sink 已发提示，这里再补一个「打开下载页」入口。
-                    ClientSelfUpdate.CheckAsync(false);
+                    // 客户端本体版本检查（v1.3）。
+                    // ⚠ 2026-10-11 定稿：手检若**发现新版本**，先把「正在检查…/打开下载页」这口
+                    //   **手检自己的**弹窗收掉，再让新版本提示（CLIENT_UPDATE_NOTIFY）弹出来，
+                    //   不把两口框叠给玩家。
+                    //   ⛔ 收窗必须发生在 Sink 之前 —— 借 CheckAsync 的 onDone 回调（它就在 Sink 前调用）；
+                    //     若放到 Sink 之后，收窗会把刚弹出的 notify 一起收掉（消息框是单槽的）。
+                    //   ⛔ 先 show 再起检查：保证「框已存在」不晚于任何回调（下载协程首个 yield 前是同步段）。
                     RMSshow_yesOrNo(
                         "CLIENT_UPDATE_PAGE",
                         "正在检查客户端更新…\n若稍后提示有新版，可点「是」直接前往下载页\n（夸克网盘：" + ClientSelfUpdate.UpdatePageUrl() + "）",
                         new messageSystemValue { value = "yes", hint = "打开下载页" },
                         new messageSystemValue { value = "no", hint = "取消" });
+                    ClientSelfUpdate.CheckAsync(false, delegate (ClientSelfUpdate.CheckResult r)
+                    {
+                        // 只在「发现新版本」时收掉自己那口框；无新版/连不上则保留
+                        // （后者玩家仍可点框里的「打开下载页」）。
+                        if (r != null && r.HasUpdate) RMSshow_clear();
+                    });
                 }
                 break;
             case "CLIENT_UPDATE_PAGE":
@@ -3273,7 +3283,7 @@ public class Menu : WindowServantSP
             if (!Directory.Exists(downloadsDir)) Directory.CreateDirectory(downloadsDir);
             if (!Directory.Exists(expansionsDir)) Directory.CreateDirectory(expansionsDir);
 
-            Program.PrintToChat("开始强制重新下载超先行卡包...\n请注意超先行卡更新会清空原来的 expansions 文件夹");
+            Program.PrintToChat("开始强制重新下载超先行卡包...\n自定义卡包与卡图将保留。");
 
             bool downloadCompleted = false;
             string downloadFailureReason = null;
@@ -3313,7 +3323,6 @@ public class Menu : WindowServantSP
             try
             {
                 ReleaseExpansionZipHandles(expansionsDir);
-                ClearDirectory(expansionsDir);
             }
             catch (Exception e)
             {
@@ -3326,7 +3335,6 @@ public class Menu : WindowServantSP
             try
             {
                 InstallSuperPrePack(ypkFilePathInDownloads, expansionsDir);
-                ReloadExpansionAfterUpdate(expansionsDir);
 
                 Program.PrintToChat("超先行卡包安装完成，卡包数据已重新载入。");
             }
@@ -3384,7 +3392,7 @@ public class Menu : WindowServantSP
         if (!Directory.Exists(downloadsDir)) Directory.CreateDirectory(downloadsDir);
         if (!Directory.Exists(expansionsDir)) Directory.CreateDirectory(expansionsDir);
 
-        Program.PrintToChat("开始检查超先行卡更新...\n请注意超先行卡更新会清空原来的 expansions 文件夹");
+        Program.PrintToChat("开始检查超先行卡更新...\n自定义卡包与卡图将保留。");
 
         // --- 3. 下载文件 ---
         bool downloadCompleted = false;
@@ -3426,7 +3434,8 @@ public class Menu : WindowServantSP
         }
 
         // --- 5. 应用更新 ---
-        if (newVersionDownloaded)
+        if (newVersionDownloaded || !ManagedPackInstall.SameContent(ypkFilePathInDownloads,
+                Path.Combine(expansionsDir, ypkFileName)))
         {
             Program.PrintToChat("下载完成，开始应用更新...");
             yield return null;
@@ -3434,12 +3443,10 @@ public class Menu : WindowServantSP
             Program.PrintToChat("正在清理旧文件...");
             // 同步操作，如果失败会抛出异常
             ReleaseExpansionZipHandles(expansionsDir);
-            ClearDirectory(expansionsDir);
             yield return null;
 
             Program.PrintToChat("正在安装新文件...");
             InstallSuperPrePack(ypkFilePathInDownloads, expansionsDir);
-            ReloadExpansionAfterUpdate(expansionsDir);
 
             Program.PrintToChat("超先行卡包安装完成，卡包数据已重新载入。");
         }
@@ -3477,7 +3484,20 @@ public class Menu : WindowServantSP
     private void InstallSuperPrePack(string packFilePath, string dirPath)
     {
         string target = Path.Combine(dirPath, Path.GetFileName(packFilePath));
-        File.Copy(packFilePath, target, true);
+        try
+        {
+            ManagedPackInstall.Begin(packFilePath, target);
+            ReloadExpansionAfterUpdate(dirPath);
+            if (!ManagedPackInstall.Commit(target))
+                UnityEngine.Debug.LogWarning("[SuperPreUpdate] 安装成功，暂存清理将在下次启动重试。");
+        }
+        catch
+        {
+            ReleaseExpansionZipHandles(dirPath);
+            ManagedPackInstall.Recover(target);
+            ReloadExpansionAfterUpdate(dirPath);
+            throw;
+        }
         Program.PrintToChat($"已安装 {Path.GetFileName(packFilePath)}（{new FileInfo(target).Length / 1048576} MB）");
     }
 
@@ -3487,53 +3507,15 @@ public class Menu : WindowServantSP
     /// </summary>
     private void ReloadExpansionAfterUpdate(string dirPath)
     {
-        int opened = GameZipManager.OpenZipsUnder(dirPath);
-        if (opened <= 0)
+        GameZipManager.OpenZipsUnder(dirPath);
+        string official = Path.Combine(dirPath, "ygopro-super-pre.ypk");
+        if (File.Exists(official) && !GameZipManager.HasZip(official))
         {
-            Program.PrintToChat("警告：新卡包句柄未能重新登记，请重启游戏后再使用先行卡。");
-            return;
+            throw new IOException("卡包句柄未能重新登记。");
         }
         if (!Program.I().ReloadGameDatabases())
         {
-            Program.PrintToChat("警告：卡包数据重载失败，请重启游戏后再使用先行卡。");
-        }
-    }
-
-    /// <summary>
-    /// [辅助方法] 安全地清空一个目录下的所有文件和子目录。
-    /// 逐个删、失败不中断，最后把「删不掉的」连原因一起抛出去，便于定位是谁占着文件。
-    /// </summary>
-    private void ClearDirectory(string dirPath)
-    {
-        if (!Directory.Exists(dirPath)) return;
-        DirectoryInfo di = new DirectoryInfo(dirPath);
-        List<string> failures = new List<string>();
-        foreach (FileInfo file in di.GetFiles())
-        {
-            try
-            {
-                file.Delete();
-            }
-            catch (Exception e)
-            {
-                failures.Add($"{file.Name}（{e.GetType().Name}: {e.Message}）");
-            }
-        }
-        foreach (DirectoryInfo dir in di.GetDirectories())
-        {
-            try
-            {
-                dir.Delete(true);
-            }
-            catch (Exception e)
-            {
-                failures.Add($"{dir.Name}/（{e.GetType().Name}: {e.Message}）");
-            }
-        }
-        if (failures.Count > 0)
-        {
-            throw new IOException(
-                "以下文件删不掉，多半仍被占用（重启游戏后再试）：" + string.Join("；", failures));
+            throw new IOException("卡包数据重载失败，恢复旧卡包。");
         }
     }
 
@@ -3729,9 +3711,10 @@ public class Menu : WindowServantSP
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception error)
             {
-                // Debug.Log(e);
+                QuickTestTrace.Log("err", "command failed: " + error);
+                UnityEngine.Debug.LogException(error);
             }
             try
             {

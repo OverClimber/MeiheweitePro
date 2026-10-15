@@ -11,6 +11,27 @@ using YGOSharp.OCGWrapper.Enums;
 
 public static class TcpHelper
 {
+    // The bundled Android server uses the classic global forced byte. The
+    // desktop client uses one forced byte per chain entry. Only its local
+    // server's messages may call this adapter; network/desktop packets differ.
+    public static byte[] NormalizeClassicSelectChain(byte[] data)
+    {
+        if (data == null || data.Length < 12 || data.Length != 12 + data[1] * 13)
+            throw new InvalidDataException("Invalid classic SelectChain payload");
+        int count = data[1];
+        byte[] result = new byte[11 + count * 14];
+        Buffer.BlockCopy(data, 0, result, 0, 3);
+        Buffer.BlockCopy(data, 4, result, 3, 8);
+        for (int i = 0; i < count; i++)
+        {
+            int source = 12 + i * 13, target = 11 + i * 14;
+            result[target] = data[source];
+            result[target + 1] = data[3];
+            Buffer.BlockCopy(data, source + 1, result, target + 2, 12);
+        }
+        return result;
+    }
+
     public static TcpClient tcpClient = null;
 
     static  NetworkStream networkStream = null;
@@ -86,6 +107,7 @@ public static class TcpHelper
         public readonly Socket Socket;
         public readonly ConcurrentQueue<byte[]> Incoming = new ConcurrentQueue<byte[]>();
         public readonly ConcurrentQueue<byte[]> Outgoing = new ConcurrentQueue<byte[]>();
+        public readonly AutoResetEvent IncomingSignal = new AutoResetEvent(false);
         public readonly AutoResetEvent OutgoingSignal = new AutoResetEvent(false);
         public readonly CancellationTokenSource Cts = new CancellationTokenSource();
 
@@ -119,6 +141,7 @@ public static class TcpHelper
         public void Dispose()
         {
             try { OutgoingSignal.Dispose(); } catch { }
+            try { IncomingSignal.Dispose(); } catch { }
             try { Cts.Dispose(); } catch { }
         }
     }
@@ -339,6 +362,7 @@ public static class TcpHelper
         }
 
         localState.Incoming.Enqueue(data);
+        try { localState.IncomingSignal.Set(); } catch (ObjectDisposedException) { }
         return true;
     }
 
@@ -479,6 +503,29 @@ public static class TcpHelper
     static List<byte[]> datas = new List<byte[]>();
 
     public static void preFrameFunction()
+    {
+        var budget = DuelUndo.active && DuelUndo.catchingUp
+            ? System.Diagnostics.Stopwatch.StartNew() : null;
+        ProcessIncomingFrame();
+        // Local replay is request/response driven. Permit several round trips per
+        // frame, bounded to 4 ms; never busy-spin or wait for a thinking opponent.
+        for (int round = 0; budget != null && round < 64
+            && budget.ElapsedMilliseconds < 4 && DuelUndo.active && DuelUndo.catchingUp; round++)
+        {
+            ConnectionState current;
+            lock (stateLock) { current = state; }
+            if (current == null || current.Closing) break;
+            if (current.Incoming.IsEmpty)
+            {
+                try { if (!current.IncomingSignal.WaitOne(1)) break; }
+                catch (ObjectDisposedException) { break; }
+            }
+            if (current.Closing) break;
+            ProcessIncomingFrame();
+        }
+    }
+
+    static void ProcessIncomingFrame()
     {
         // ① 注入包（离线核心 / 录像回放，来自 precy.cs 的 addDateJumoLine）—— 与连接无关。
         while (injectedIncoming.TryDequeue(out var injectedPacket))
@@ -792,10 +839,11 @@ public static class TcpHelper
     static void SenderLoop(object obj)
     {
         var localState = (ConnectionState)obj;
-        var token = localState.Cts.Token;
 
         try
         {
+            // 快速重开可能已释放旧连接；Token 读取也必须在异常保护内。
+            var token = localState.Cts.Token;
             while (!token.IsCancellationRequested && Program.Running)
             {
                 if (!localState.Outgoing.TryDequeue(out var frame))

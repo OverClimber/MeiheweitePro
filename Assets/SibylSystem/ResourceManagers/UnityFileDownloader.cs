@@ -23,7 +23,9 @@ public class UnityFileDownloader
         Action<bool> onComplete,
         Action<float> onProgress = null,
         Func<string, bool> validateDownloadedFile = null,
-        Action<string> onError = null
+        Action<string> onError = null,
+        Action<long> onHttpResponse = null,
+        Func<bool> preserveExistingFile = null
     )
     {
         // 确保目录存在
@@ -67,6 +69,7 @@ public class UnityFileDownloader
                 uwr,
                 onProgress,
                 () => { stalled = true; });
+            if (onHttpResponse != null) onHttpResponse(uwr.responseCode);
 
             if (!stalled && uwr.result == UnityWebRequest.Result.Success)
             {
@@ -75,7 +78,8 @@ public class UnityFileDownloader
                     tempFilePath,
                     filePath,
                     validateDownloadedFile,
-                    out installFailure))
+                    out installFailure,
+                    preserveExistingFile))
                 {
                     CompleteFailure(onComplete, onError, installFailure);
                     yield break;
@@ -208,7 +212,9 @@ public class UnityFileDownloader
         Action onDownloadStarted = null,
         Func<string, bool> validateDownloadedFile = null,
         Action<string> onError = null,
-        bool forceDownload = false)
+        bool forceDownload = false,
+        Action<long> onHttpResponse = null,
+        Func<bool> preserveExistingFile = null)
     {
 #if UNITY_EDITOR
         Debug.Assert(
@@ -255,6 +261,8 @@ public class UnityFileDownloader
             filePath,
             forceDownload,
             (result) => { metadata = result; });
+
+        if (onHttpResponse != null && metadata != null) onHttpResponse(metadata.ResponseCode);
 
         if (metadata == null || !metadata.Succeeded)
         {
@@ -365,7 +373,8 @@ public class UnityFileDownloader
                 (success) => { downloadSucceeded = success; },
                 onProgress,
                 validateDownloadedFile,
-                (reason) => { attemptFailure = reason; }
+                (reason) => { attemptFailure = reason; },
+                preserveExistingFile
             );
             downloadAttempts = 1;
             downloadFailure = string.IsNullOrEmpty(attemptFailure)
@@ -384,7 +393,9 @@ public class UnityFileDownloader
                     (success) => { downloadSucceeded = success; },
                     onProgress,
                     validateDownloadedFile,
-                    (reason) => { attemptFailure = reason; }
+                    (reason) => { attemptFailure = reason; },
+                    onHttpResponse,
+                    preserveExistingFile
                 );
                 if (downloadSucceeded)
                 {
@@ -459,7 +470,8 @@ public class UnityFileDownloader
         Action<bool> onComplete,
         Action<float> onProgress,
         Func<string, bool> validateDownloadedFile,
-        Action<string> onError)
+        Action<string> onError,
+        Func<bool> preserveExistingFile = null)
     {
         if (contentLength <= 0L)
         {
@@ -716,7 +728,8 @@ public class UnityFileDownloader
             tempFilePath,
             filePath,
             validateDownloadedFile,
-            out installFailure))
+            out installFailure,
+            preserveExistingFile))
         {
             CompleteFailure(onComplete, onError, installFailure);
             yield break;
@@ -762,10 +775,16 @@ public class UnityFileDownloader
         string tempFilePath,
         string filePath,
         Func<string, bool> validateDownloadedFile,
-        out string failure)
+        out string failure,
+        Func<bool> preserveExistingFile = null)
     {
         failure = null;
         string validationFailure;
+        if (preserveExistingFile != null && preserveExistingFile())
+        {
+            TryDeleteFileQuietly(tempFilePath);
+            return true;
+        }
         if (!TryValidateFile(
             tempFilePath,
             validateDownloadedFile,
@@ -980,6 +999,7 @@ public class UnityFileDownloader
         public string ResolvedUrl;
         public string Failure;
         public int Attempts;
+        public long ResponseCode;
     }
 
     /// <summary>
@@ -1003,6 +1023,7 @@ public class UnityFileDownloader
             {
                 headRequest.timeout = HeadRequestTimeoutSeconds;
                 yield return headRequest.SendWebRequest();
+                metadata.ResponseCode = headRequest.responseCode;
 
                 if (headRequest.result == UnityWebRequest.Result.Success)
                 {
@@ -1071,6 +1092,7 @@ public class UnityFileDownloader
             }
             else
             {
+                metadata.ResponseCode = fallback == null ? 0 : fallback.ResponseCode;
                 metadata.Failure = string.Format(
                     "{0}；GET 回退探测也失败：{1}",
                     string.IsNullOrEmpty(headFailure)
@@ -1108,6 +1130,7 @@ public class UnityFileDownloader
                 probeRequest.timeout = HeadRequestTimeoutSeconds;
                 probeRequest.SetRequestHeader("Range", "bytes=0-0");
                 yield return probeRequest.SendWebRequest();
+                metadata.ResponseCode = probeRequest.responseCode;
 
                 if (probeRequest.result == UnityWebRequest.Result.Success)
                 {

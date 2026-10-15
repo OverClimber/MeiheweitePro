@@ -580,6 +580,8 @@ public class Program : MonoBehaviour
             // 读盘之前先兑现上次没走完的数据更新事务：否则可能把「新一半旧一半」的
             // 三件套读进内存。回滚失败会置 Failed，之后的更新流程不会再动数据。
             ClientDataUpdater.RecoverTransaction();
+            ManagedPackInstall.Recover("expansions/ygopro-super-pre.ypk");
+            CardScriptUpdater.EnsureTypeCompatibility(Directory.GetCurrentDirectory());
 
             // RD 数据的 ypk 更新通道：rd/update/*.ypk 在任何数据库装载之前应用，
             // 装载读到的就是新数据（见 RdDataUpdater 头注释的包格式与失败口径）。
@@ -682,6 +684,7 @@ public class Program : MonoBehaviour
                 }
             }
 
+            lock (GameZipManager.SyncRoot)
             foreach (ZipFile zip in GameZipManager.Zips)
             {
                 if (zip.Name.ToLower().EndsWith("script.zip"))
@@ -839,6 +842,7 @@ public class Program : MonoBehaviour
             }
 
             // zip 句柄启动时已装进 GameZipManager.Zips，这里只重放内容，不重新打开文件。
+            lock (GameZipManager.SyncRoot)
             foreach (ZipFile zip in GameZipManager.Zips)
             {
                 if (zip.Name.ToLower().EndsWith("script.zip"))
@@ -1850,8 +1854,18 @@ public class Program : MonoBehaviour
 
     #region MonoBehaviors
 
+    // 外部启动器可能继承自己的工作目录；所有相对资源路径必须以播放器目录为根。
+    static void InitializePlayerDirectory()
+    {
+#if UNITY_STANDALONE_WIN && !UNITY_EDITOR
+        Directory.SetCurrentDirectory(Path.GetDirectoryName(Application.dataPath));
+#endif
+    }
+
     void Start()
     {
+        InitializePlayerDirectory();
+        QuickTestTrace.ResetForCurrentDirectory();
         if (Screen.width < 100 || Screen.height < 100)
         {
             Screen.SetResolution(1300, 700, false);
@@ -2280,6 +2294,7 @@ public class Program : MonoBehaviour
             //adeUnityEngine.Debug.Log(e);
         }
         Menu.deleteShell();
+        lock (GameZipManager.SyncRoot)
         foreach (ZipFile zip in GameZipManager.Zips)
         {
             zip.Dispose();

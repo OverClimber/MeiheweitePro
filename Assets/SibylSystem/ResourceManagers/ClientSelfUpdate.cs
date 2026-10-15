@@ -20,7 +20,12 @@ using UnityEngine;
 ///   ① 版本源是**候选列表**（jsDelivr 优先 → GitHub 直连 → gh-proxy），逐个尝试，
 ///      任一成功即用 —— 解决大陆玩家直连 raw.githubusercontent.com 不稳的问题。
 ///   ② 只提示 + 提供「打开下载页」（夸克网盘），**不**在客户端内置大文件下载。
-///   ③ 已见版本记进 Config ini（<c>lastSeenClientVersion</c>），避免每次启动都弹。
+///   ③ 弹窗**不做去重**（2026-10-11 用户定稿）：只要远端版本 ≠ 本地版本，
+///      **每次启动都会弹**。原先「已见版本记 Config ini（<c>lastSeenClientVersion</c>）、
+///      同一版本只弹一次」的机制已**整条移除**（见 <see cref="NotifyUpdate"/>）。
+///      ⚠ 副作用：主菜单「资源更新 → 检查客户端更新」那次手动检查也会走同一条提示，
+///        因此有新版时手动检查会**同时**看到「正在检查…」与「发现新版本」两个弹窗。
+///        这是「不等必弹」的直接后果，有意保留。
 /// </summary>
 public static class ClientSelfUpdate
 {
@@ -47,8 +52,21 @@ public static class ClientSelfUpdate
     ///    判定口径没变（仍是**字符串不等**）⇒ 只要仓库根的 `version.txt` 还停在 2.1
     ///    （本次**故意不同步抬**），客户端就会报「发现新版本 v2.1（当前 v2.2）」并弹窗。
     ///    ⚠ 这正是上面①②那条铁律的**反向验证场景**：本次**只当测试**，不算正式发布；
-    ///    将来真发 2.2，仍必须「先让包上线、再抬 version.txt」，否则回到①②的坑。</para></summary>
-    public const string ClientVersionText = "2.2";
+    ///    将来真发 2.2，仍必须「先让包上线、再抬 version.txt」，否则回到①②的坑。</para>
+    /// <para>⛔⛔ 2.2.1fix（2026-10-11）：从 2.2 抬到 **2.2.1fix**（用户定名的修复版标识）。
+    ///    判定口径**不变**（仍是**字符串不等**，不比大小）：仓库根 `version.txt` 现为 2.2
+    ///    （**未**同步抬），⇒ 本地 `2.2.1fix` ≠ 远端 `2.2` ⇒ 每次启动都命中「版本不等」。
+    ///    ⚠ 与 2.2 那次测试目的一致，但**更强**：本轮同时移除了「同版本只弹一次」去重
+    ///    （见 <see cref="NotifyUpdate"/>），所以「每次启动只要不等就弹」是**必然**的，
+    ///    不再受 `lastSeenClientVersion` 限制。</para>
+    /// <para>⛔⛔ 2.3（2026-10-12）：从 2.2.1fix 抬到 **2.3**（正式发布版）。
+    ///    本轮**同步**抬了仓库根 `version.txt`（三源均为 2.3），并按 `2.2→2.3` 另出增量包。
+    ///    判定口径仍为**字符串不等**（不比大小）。</para>
+    /// <para>⛔⛔ 2.3.1（2026-10-15）：从 2.3 抬到 **2.3.1** —— 承接 10-13~10-15 的新工作
+    ///    （装备/连线的 SZONE 谓词与雷电渲染修复、菜单与 Servant 调整、卡牌脚本更新器改动）。
+    ///    发版顺序照旧**不可换**：先让完整包与 `2.3→2.3.1` 增量包上线、判据全绿，
+    ///    **最后**才抬仓库根 `version.txt`；抬早了用户会被提示却下不到新包。</para></summary>
+    public const string ClientVersionText = "2.3.1";
 
     /// <summary>版本文件在各源里的相对路径（仓库根 main 分支）。内容：纯文本，首行 = 版本串。</summary>
     const string VersionFileRel = "version.txt";
@@ -59,7 +77,7 @@ public static class ClientSelfUpdate
     // Config ini 键
     const string KeyVersionUrls = "clientUpdateVersionUrls";
     const string KeyPageUrl = "clientUpdatePageUrl";
-    const string KeyLastSeen = "lastSeenClientVersion";
+    // ⛔ 原 `lastSeenClientVersion` 去重键已移除（2026-10-11）：弹窗不再去重。
 
     /// <summary>内置默认版本源（按 2026-09-25 实测稳定性排序：jsDelivr 最稳，gh-proxy 兜底）。
     /// ⛔ 实测 raw.gitmirror.com / raw.kkgithub.com 已失效（code=000），不要加回来。</summary>
@@ -107,7 +125,7 @@ public static class ClientSelfUpdate
     /// <summary>当前挂着的扩展点实现；null ⇒ 用默认（提示 + 打开下载页）。</summary>
     public static IClientUpdateSink Sink;
 
-    /// <summary>默认实现：只在「有新版」时弹一次提示，提供打开下载页。</summary>
+    /// <summary>默认实现：「有新版」即弹提示（不去重，每次启动都弹，见 <see cref="NotifyUpdate"/>）。</summary>
     sealed class DefaultSink : IClientUpdateSink
     {
         public void OnChecked(CheckResult r)
@@ -155,19 +173,9 @@ public static class ClientSelfUpdate
         return v;
     }
 
-    /// <summary>是否已对本版本提示过（避免每次启动都弹）。</summary>
-    public static bool AlreadySeen(string version)
-    {
-        try { return Config.Get(KeyLastSeen, "") == version; }
-        catch { return false; }
-    }
-
-    /// <summary>记住已提示过的版本。</summary>
-    public static void MarkSeen(string version)
-    {
-        try { Config.Set(KeyLastSeen, version); }
-        catch (Exception e) { Debug.Log(e); }
-    }
+    // ⛔ 去重 API（原 AlreadySeen / MarkSeen，读写的 Config 键 `lastSeenClientVersion`）
+    //    已于 2026-10-11 **整条移除** —— 需求改为「每次启动只要版本不等就弹」，
+    //    去重与之直接冲突，保留只会是死代码。若将来要恢复，参照 git 历史。
 
     // ------------------------------------------------------------------
     // 检查流程
@@ -179,9 +187,21 @@ public static class ClientSelfUpdate
     /// </summary>
     public static void CheckAsync(bool silentWhenNoUpdate)
     {
+        CheckAsync(silentWhenNoUpdate, null);
+    }
+
+    /// <summary>带完成回调的检查（2026-10-11 新增，供「手检」路径用）。
+    ///
+    /// <paramref name="onDone"/> 在 Sink 弹提示**之前**调用 —— 给调用方一个「先把自己那口弹窗
+    /// 收掉、再让新版本提示弹出来」的时机；全部源都不通时以 <c>null</c> 调用。
+    /// <para>⛔ **顺序即语义**：回调必须早于 <see cref="IClientUpdateSink.OnChecked"/>，
+    /// 否则「收窗」会把刚弹出的 notify 弹窗一起收掉（消息框是**单槽**的，
+    /// <see cref="Servant.RMSshow_clear"/> 收的就是当前那口框）。</para></summary>
+    public static void CheckAsync(bool silentWhenNoUpdate, Action<CheckResult> onDone)
+    {
         try
         {
-            Program.I().StartCoroutine(CheckCoroutine(silentWhenNoUpdate));
+            Program.I().StartCoroutine(CheckCoroutine(silentWhenNoUpdate, onDone));
         }
         catch (Exception e)
         {
@@ -189,7 +209,7 @@ public static class ClientSelfUpdate
         }
     }
 
-    static IEnumerator CheckCoroutine(bool silentWhenNoUpdate)
+    static IEnumerator CheckCoroutine(bool silentWhenNoUpdate, Action<CheckResult> onDone)
     {
         QuickTestTrace.Log("clientupdate", "check start local=" + ClientVersionText);
         string[] urls = VersionUrls();
@@ -235,6 +255,7 @@ public static class ClientSelfUpdate
         if (hit == null)
         {
             QuickTestTrace.Log("clientupdate", "check all-failed err=" + (lastErr ?? "?"));
+            if (onDone != null) { try { onDone(null); } catch (Exception e) { Debug.Log(e); } }
             if (!silentWhenNoUpdate)
             {
                 Program.PrintToChat("客户端更新检查：暂时连不上版本服务器，稍后再试。");
@@ -245,6 +266,10 @@ public static class ClientSelfUpdate
         QuickTestTrace.Log("clientupdate",
             "check ok remote=" + hit.RemoteVersion + " hasUpdate=" + (hit.HasUpdate ? 1 : 0)
             + " src=" + hit.SourceUrl);
+
+        // ⛔ 顺序不可换：先让调用方（手检路径）收掉自己那口弹窗，再让 Sink 弹「发现新版本」。
+        //    反过来的话，收窗会把刚弹出的 notify 一起收掉（消息框单槽）。
+        if (onDone != null) { try { onDone(hit); } catch (Exception e) { Debug.Log(e); } }
 
         EffectiveSink().OnChecked(hit);
 
@@ -290,14 +315,10 @@ public static class ClientSelfUpdate
     // 提示 + 打开下载页
     // ------------------------------------------------------------------
 
-    /// <summary>有新版时的提示（默认实现调这里；将来换 Sink 也可复用）。</summary>
+    /// <summary>有新版时的提示（默认实现调这里；将来换 Sink 也可复用）。
+    /// ⛔ **不去重**：2026-10-11 起，只要走到这里就**一定**弹 —— 每次启动版本不等都会弹。</summary>
     static void NotifyUpdate(string remoteVersion)
     {
-        if (AlreadySeen(remoteVersion))
-        {
-            return; // 同一版本弹过一次就不再打扰
-        }
-        MarkSeen(remoteVersion);
         // 用户 2026-10-09 定稿：从「只往聊天栏打一行字」改成**弹窗**（参照 ygopro2 的
         // 「发现 xxx，是否前往更新」）。判据是「玩家不去翻聊天栏也能知道有新版、并能一键前往」。
         // 走 Menu 那套现成的 RMSshow_yesOrNo（与「资源更新」菜单同一个出口），

@@ -163,6 +163,9 @@ public class Room : WindowServantSP
     /// （对齐 MDPro3 的 RoomServant.FromHandTest），所以这个协程由 StocMessage_JoinGame
     /// 直接拉起，而不是等 show()。
     /// </summary>
+    private int quickFlowGeneration;
+    private bool quickTypeKnown;
+
     private System.Collections.IEnumerator quickStartFlow()
     {
         if (quickFlowStarted)
@@ -171,8 +174,17 @@ public class Room : WindowServantSP
         }
         quickFlowStarted = true;
         QuickTestTrace.Log("flow", "coroutine start");
-        // 等房间状态铺完，否则 UpdateDeck 会在服务器还没登记玩家时发出去
-        yield return new WaitForSeconds(0.5f);
+        int generation = quickFlowGeneration;
+        // JoinGame precedes TypeChange/player registration. Wait for evidence,
+        // not a fixed half second; a prior room coroutine must never send here.
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (!quickTypeKnown || selftype >= 4 || roomPlayers[selftype] == null)
+        {
+            if (generation != quickFlowGeneration || deadline.ElapsedMilliseconds > 8000)
+                yield break;
+            yield return null;
+        }
+        if (generation != quickFlowGeneration) yield break;
         TcpHelper.CtosMessage_UpdateDeck(DeckForAutoStart());
         TcpHelper.CtosMessage_HsReady();
         QuickTestTrace.Log("flow", "UpdateDeck + HsReady sent, deckInUse=" + GameModeManager.DeckInUse
@@ -181,7 +193,18 @@ public class Room : WindowServantSP
         // 所以这里不赌单次，改为「每隔 1 秒重发一次 HsStart，直到真的收到 DuelStart」。
         for (int i = 0; i < 8; i++)
         {
-            yield return new WaitForSeconds(1.0f);
+            // First start as soon as both ready acknowledgements arrive.
+            // Keep one-second retries if a server ignores an early HsStart.
+            var retry = System.Diagnostics.Stopwatch.StartNew();
+            while (retry.ElapsedMilliseconds < 1000)
+            {
+                if (generation != quickFlowGeneration || quickDuelStarted) yield break;
+                bool ready = roomPlayers[0] != null && roomPlayers[0].prep
+                    && roomPlayers[1] != null && roomPlayers[1].prep;
+                if (i == 0 && ready && is_host) break;
+                yield return null;
+            }
+            if (generation != quickFlowGeneration) yield break;
             if (quickDuelStarted)
             {
                 QuickTestTrace.Log("flow", "duel started, stop retrying at #" + i);
@@ -482,6 +505,7 @@ public class Room : WindowServantSP
     public void StocMessage_TypeChange(BinaryReader r)
     {
         int type = r.ReadByte();
+        quickTypeKnown = true;
         selftype = type & 0xf;
         is_host = ((type >> 4) & 0xf) != 0;
         QuickTestTrace.Log("type", "selftype=" + selftype + " is_host=" + is_host);
@@ -1085,6 +1109,8 @@ public class Room : WindowServantSP
     lazyRoom lazyRoom = null;
     void ini()
     {
+        quickFlowGeneration++;
+        quickTypeKnown = false;
         // 「测试直开局」是一次性的：进房就消费掉，避免影响之后正常的联机对局
         quickThisDuel = quickStart;
         quickStart = false;

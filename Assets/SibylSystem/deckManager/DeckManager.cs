@@ -1641,6 +1641,9 @@ public class DeckManager : ServantWithCardDescription
 
     public override void hide()
     {
+        if (cardInDragging != null) cardInDragging.endDrag();
+        cardInDragging = null;
+        dragCreatedCard = false;
         if (isShowed)
         {
             hideDetail();
@@ -1713,7 +1716,7 @@ public class DeckManager : ServantWithCardDescription
             }
         }
 
-        if (cardInDragging != null)
+        if (cardInDragging != null && cardInDragging.IsDragging)
         {
             if (detailPanelShiftedTemp == false)
             {
@@ -1831,6 +1834,7 @@ public class DeckManager : ServantWithCardDescription
     }
 
     public MonoCardInDeckManager cardInDragging = null;
+    bool dragCreatedCard;
     int timeLastDown = 0;
     GameObject goLast = null;
 
@@ -1867,6 +1871,7 @@ public class DeckManager : ServantWithCardDescription
             else
             {
                 cardInDragging = cardInDeck;
+                dragCreatedCard = false;
                 cardInDeck.beginDrag();
             }
         }
@@ -1884,7 +1889,8 @@ public class DeckManager : ServantWithCardDescription
                         card.gameObject.layer = 16;
                         deck.IMain.Add(card);
                         cardInDragging = card;
-                        card.beginDrag();
+                        dragCreatedCard = true;
+                        card.beginDrag(true);
                     }
                 }
             }
@@ -1905,40 +1911,74 @@ public class DeckManager : ServantWithCardDescription
             return;
         }
         MonoCardInDeckManager card = cardInDragging;
-        cardInDragging = null;
-
+        bool moved = card.UpdateDragIntent(); // includes fast motion on the release frame
         bool ctrl = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
-        bool discard = condition != Condition.changeSide && (ctrl || card.getIfAlive() == false);
+        Vector3 dropAt;
+        if (!card.TryGetDropPosition(out dropAt))
+        {
+            CancelCardDrag();
+            return;
+        }
+        cardInDragging = null;
+        bool created = dragCreatedCard;
+        dragCreatedCard = false;
+        card.endDrag();
+        if (!moved && !created && !ctrl) return; // a click never reorders a deck
+        if (moved) goLast = null; // a completed drag is not the first click of a double-click
 
+        bool discard = condition != Condition.changeSide && (ctrl || DeckDragGeometry.Outside(dropAt));
         if (discard)
         {
-            QuickTestTrace.Log("drag", "discard card " + card.cardData.Id
-                + " ctrl=" + ctrl + " alive=" + card.getIfAlive());
+            RemoveDraggedCard(card);
             card.killIt();
-            card.endDrag();
-            ArrangeObjectDeck();
+            deck.IRemoved.Add(card);
+            deckDirty = true;
             ShowObjectDeck();
             return;
         }
-
-        if (card.getIfAlive())
+        // Changing sides outside the board cancels rather than silently moving a card.
+        if (condition == Condition.changeSide && DeckDragGeometry.Outside(dropAt))
         {
-            deckDirty = true;
+            ShowObjectDeck();
+            return;
         }
-        card.endDrag();
-        Vector3 dropAt = card.transform.position;
-        SnapDraggedCardIntoDeck(card);
+        deckDirty = true;
+        SnapDraggedCardIntoDeck(card, dropAt);
         ShowObjectDeck();
         QuickTestTrace.Log("drag", "drop card " + card.cardData.Id
-            + " at x=" + dropAt.x.ToString("F2") + " z=" + dropAt.z.ToString("F2")
-            + " -> main=" + deck.IMain.Count + " extra=" + deck.IExtra.Count
-            + " side=" + deck.ISide.Count);
-        // 吸附后复采一次：确认整盘重排后每张卡仍精确落在自己的槽位上（无空位/重叠）
+            + " pointer x=" + dropAt.x.ToString("F2") + " z=" + dropAt.z.ToString("F2")
+            + " -> main=" + deck.IMain.Count + " extra=" + deck.IExtra.Count + " side=" + deck.ISide.Count);
         safeGogo(900, () => { SampleSlotLanding("drop"); });
+    }
+
+    public void CancelCardDrag()
+    {
+        if (cardInDragging == null) return;
+        var card = cardInDragging;
+        cardInDragging = null;
+        card.endDrag();
+        if (dragCreatedCard)
+        {
+            RemoveDraggedCard(card);
+            card.killIt();
+            deck.IRemoved.Add(card);
+        }
+        dragCreatedCard = false;
+        goLast = null;
+        ShowObjectDeck();
+    }
+
+    void RemoveDraggedCard(MonoCardInDeckManager card)
+    {
+        deck.IMain.Remove(card);
+        deck.IExtra.Remove(card);
+        deck.ISide.Remove(card);
+        deck.IRemoved.Remove(card);
     }
 
     public override void ES_mouseUpRight()
     {
+        if (cardInDragging != null) { CancelCardDrag(); return; }
         if (Program.pointedGameObject != null)
         {
             if (condition == Condition.editDeck)
@@ -2046,6 +2086,7 @@ public class DeckManager : ServantWithCardDescription
 
     void SampleSlotLanding(string when)
     {
+        if (!QuickTestTrace.Enabled || cardInDragging != null) return;
         try
         {
             System.Collections.Generic.IList<int> expectMain = new List<int>();
@@ -2060,28 +2101,35 @@ public class DeckManager : ServantWithCardDescription
                 expectExtra = refDeck.Extra.Count;
                 expectSide = refDeck.Side.Count;
             }
-            FromObjectDeckToCodedDeck();
+            // Diagnostic sampling must not rebucket cards while animations run.
+            // Read the logical lists; never change the deck to measure it.
+            var actualMain = new List<int>();
+            var actualExtra = new List<int>();
+            var actualSide = new List<int>();
+            foreach (var card in deck.IMain) actualMain.Add(card.cardData.Id);
+            foreach (var card in deck.IExtra) actualExtra.Add(card.cardData.Id);
+            foreach (var card in deck.ISide) actualSide.Add(card.cardData.Id);
             int diff = 0;
-            int n = Mathf.Min(expectMain.Count, deck.Main.Count);
+            int n = Mathf.Min(expectMain.Count, actualMain.Count);
             for (int i = 0; i < n; i++)
             {
-                if (expectMain[i] != deck.Main[i])
+                if (expectMain[i] != actualMain[i])
                 {
                     diff++;
                 }
             }
             QuickTestTrace.Log("slot", when
                 + " deck=" + dn
-                + " main=" + deck.Main.Count + "/" + expectMain.Count
-                + " extra=" + deck.Extra.Count + "/" + expectExtra
-                + " side=" + deck.Side.Count + "/" + expectSide
+                + " main=" + actualMain.Count + "/" + expectMain.Count
+                + " extra=" + actualExtra.Count + "/" + expectExtra
+                + " side=" + actualSide.Count + "/" + expectSide
                 + " orderDiffVsYdk=" + diff);
             DumpSlotGeometry(when, "M", deck.IMain);
             DumpSlotGeometry(when, "E", deck.IExtra);
             DumpSlotGeometry(when, "S", deck.ISide);
-            QuickTestTrace.Log("order", when + " main=" + JoinIds(deck.Main));
-            QuickTestTrace.Log("order", when + " extra=" + JoinIds(deck.Extra));
-            QuickTestTrace.Log("order", when + " side=" + JoinIds(deck.Side));
+            QuickTestTrace.Log("order", when + " main=" + JoinIds(actualMain));
+            QuickTestTrace.Log("order", when + " extra=" + JoinIds(actualExtra));
+            QuickTestTrace.Log("order", when + " side=" + JoinIds(actualSide));
         }
         catch (Exception e)
         {
@@ -2328,30 +2376,13 @@ public class DeckManager : ServantWithCardDescription
     /// 之后位置完全由 RowSlotPose 给出。所以既不需要物理，也不存在
     /// 「落点被求解器顶偏 → 串格 / 顺序乱」。
     /// </summary>
-    void SnapDraggedCardIntoDeck(MonoCardInDeckManager card)
+    void SnapDraggedCardIntoDeck(MonoCardInDeckManager card, Vector3 p)
     {
-        if (card == null)
-        {
-            return;
-        }
-        // 1) 先按落点重新归桶（主 / 额外 / 副 / 已移除），其它卡保持各自相对顺序
-        ArrangeObjectDeck();
-
-        // 2) 把这张卡从所有桶里摘出来（它此刻已在某个桶里），准备按落点重新插入
-        deck.IMain.Remove(card);
-        deck.IExtra.Remove(card);
-        deck.ISide.Remove(card);
-        deck.IRemoved.Remove(card);
-
-        if (card.getIfAlive() == false)
-        {
-            // 丢到桌面外了：进「已移除」，不再重新摆位
-            deck.IRemoved.Add(card);
-            return;
-        }
-
-        Vector3 p = card.transform.position;
-        if (p.z > -8f)
+        if (card == null) return;
+        // Only the dragged card changes lists. Other cards may still be tweening;
+        // re-bucketing all of them by animated coordinates corrupts their order.
+        RemoveDraggedCard(card);
+        if (p.z > DeckDragGeometry.SideBoundary)
         {
             if (card.cardData.IsExtraCard())
             {
@@ -2385,28 +2416,23 @@ public class DeckManager : ServantWithCardDescription
             return 0;
         }
         int[] hangshu = UIHelper.get_decklieshuArray(total);
-        int best = 0;
-        float bestD = float.MaxValue;
-        int baseIndex = 0;
-        for (int row = 0; row < 4; row++)
+        int bestRow = 0, rowStart = 0, offset = 0;
+        float rowDistance = float.MaxValue;
+        for (int row = 0; row < 4 && offset < total; row++)
         {
-            float rz = 11.8f - row * 4f;
-            for (int col = 0; col < hangshu[row]; col++)
-            {
-                int idx = baseIndex + col;
-                if (idx >= total)
-                {
-                    break;
-                }
-                float sx = UIHelper.get_left_right_index(-12.5f, 12.5f, col, hangshu[row]);
-                float d = Mathf.Abs(sx - p.x) + Mathf.Abs(rz - p.z);
-                if (d < bestD)
-                {
-                    bestD = d;
-                    best = idx;
-                }
-            }
-            baseIndex += hangshu[row];
+            float distance = Mathf.Abs(11.8f - row * 4f - p.z);
+            if (distance < rowDistance) { rowDistance = distance; bestRow = row; rowStart = offset; }
+            offset += hangshu[row];
+        }
+        int best = rowStart;
+        float bestD = float.MaxValue;
+        int count = Math.Min(hangshu[bestRow], total - rowStart);
+        for (int col = 0; col < count; col++)
+        {
+            Vector3 slot, angle;
+            RowSlotPose(col, hangshu[bestRow], 11.8f - bestRow * 4f, out slot, out angle);
+            float distance = Mathf.Abs(slot.x - p.x);
+            if (distance < bestD) { bestD = distance; best = rowStart + col; }
         }
         return best;
     }

@@ -221,6 +221,10 @@ namespace Percy
         delegate UInt32 CardReader(UInt32 code, CardData* pData);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         delegate UInt32 MessageHandler(IntPtr pDuel, UInt32 messageType);
+        // Native code retains these pointers for the lifetime of the core.
+        static readonly CardReader cardReader = OnCardReader;
+        static readonly ScriptReader scriptReader = OnScriptHandler;
+        static readonly MessageHandler messageHandler = OnMessageHandler;
         [DllImport("ocgcore", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         static extern void set_card_reader(CardReader f);
         [DllImport("ocgcore", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -231,14 +235,17 @@ namespace Percy
         public static void set_card_api(smallYgopro.cardHandler h)
         {
             card_handler = h;
-            set_card_reader(OnCardReader);
+            set_card_reader(cardReader);
         }
         static smallYgopro.scriptHandler script_handler;
         public static void set_script_api(smallYgopro.scriptHandler h)
         {
             script_handler = h;
-            set_script_reader(OnScriptHandler);
+            set_script_reader(scriptReader);
         }
+#if UNITY_ANDROID && !UNITY_EDITOR
+        [AOT.MonoPInvokeCallback(typeof(ScriptReader))]
+#endif
         private static IntPtr OnScriptHandler(string scriptName, int* len)
         {
             ScriptData ret = script_handler(scriptName);
@@ -249,14 +256,20 @@ namespace Percy
         public static void set_chat_api(smallYgopro.chatHandler h)
         {
             chat_handler = h;
-            set_message_handler(OnMessageHandler);
+            set_message_handler(messageHandler);
         }
+#if UNITY_ANDROID && !UNITY_EDITOR
+        [AOT.MonoPInvokeCallback(typeof(CardReader))]
+#endif
         private static UInt32 OnCardReader(UInt32 code, CardData* pData)
         {
             *pData = card_handler(code);
             return code;
         }
         static IntPtr _buffer_2 = Marshal.AllocHGlobal(65536);
+#if UNITY_ANDROID && !UNITY_EDITOR
+        [AOT.MonoPInvokeCallback(typeof(MessageHandler))]
+#endif
         private static UInt32 OnMessageHandler(IntPtr pDuel, UInt32 messageType)
         {
             byte[] arr = new byte[256];
@@ -694,6 +707,30 @@ namespace Percy
         BinaryReader currentReader;
 
         BinaryWriter currentWriter;
+
+        // The chain list follows BOTH players, not each player's field.
+        // Exact reads prevent a truncated field from consuming unrelated messages.
+        static void CopyReloadField(BinaryReader reader, BinaryWriter writer)
+        {
+            Func<int, int> copy = count =>
+            {
+                byte[] bytes = reader.ReadBytes(count);
+                if (bytes.Length != count) throw new EndOfStreamException("Truncated ReloadField");
+                writer.Write(bytes);
+                return count == 0 ? 0 : bytes[0];
+            };
+            copy(1);
+            for (int player = 0; player < 2; player++)
+            {
+                copy(4);
+                for (int slot = 0; slot < 7; slot++)
+                    if (copy(1) != 0) copy(2);
+                for (int slot = 0; slot < 8; slot++)
+                    if (copy(1) != 0) copy(1);
+                copy(6);
+            }
+            copy(copy(1) * 15);
+        }
 
         int move(int length, bool erase = false)
         {
@@ -1296,34 +1333,7 @@ namespace Percy
                     }
                     break;
                 case GameMessage.ReloadField:
-                    move(1);
-                    for (int i_ = 0; i_ < 2; i_++)
-                    {
-                        move(4);
-                        for (int i = 0; i < 7; i++)
-                        {
-                            int val = move(1);
-                            if (val > 0)
-                            {
-                                move(2);
-                            }
-                        }
-                        for (int i = 0; i < 8; i++)
-                        {
-                            int val = move(1);
-                            if (val > 0)
-                            {
-                                move(1);
-                            }
-                        }
-                        move(1);
-                        move(1);
-                        move(1);
-                        move(1);
-                        move(1);
-                        move(1);
-                        move(move(1) * 15);
-                    }
+                    CopyReloadField(currentReader, currentWriter);
                     break;
                 case GameMessage.AiName:
                     var length = currentReader.ReadUInt16();

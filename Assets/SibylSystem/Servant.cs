@@ -1066,8 +1066,15 @@ public class Servant
         UIHelper.InterGameObject(currentMSwindow);
         UIHelper.trySetLableText(currentMSwindow, "hint_", hint);
         UIHelper.registEvent(currentMSwindow, "input_", ES_RMSpremono, null, "yes_");
-        UIHelper.getByName<UIInput>(currentMSwindow, "input_").value = default_;
-        Program.go(100, () => { UIHelper.getByName<UIInput>(currentMSwindow, "input_").isSelected = true; });
+        var inputWindow = currentMSwindow;
+        var input = UIHelper.getByName<UIInput>(inputWindow, "input_");
+        input.value = default_;
+        Program.go(100, () =>
+        {
+            // Closing or replacing a dialog cancels its pending focus request.
+            if (inputWindow != null && input != null && currentMSwindow == inputWindow)
+                input.isSelected = true;
+        });
     }
 
     public void RMSshow_none(string hint)

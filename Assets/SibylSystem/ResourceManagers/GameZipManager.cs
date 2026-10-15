@@ -5,6 +5,22 @@ using UnityEngine;
 using Ionic.Zip;
 public static class GameZipManager
 {
+    // 所有消费者（卡图、数据库重载、退出释放）共享同一把锁。
+    public static readonly object SyncRoot = new object();
+
+    public static byte[] ReadImage(string folder, string code)
+    {
+        lock (SyncRoot)
+        {
+            foreach (ZipFile zip in Zips)
+            {
+                if (zip.Name.EndsWith("script.zip", StringComparison.OrdinalIgnoreCase)) continue;
+                byte[] data = ZipImageIndex.Read(zip, folder, code);
+                if (data != null) return data;
+            }
+            return null;
+        }
+    }
     public static List<ZipFile> Zips = new List<ZipFile>();
 
     /// <summary>
@@ -16,6 +32,8 @@ public static class GameZipManager
     /// </summary>
     public static int ReleaseZipsUnder(string folder)
     {
+        lock (SyncRoot)
+        {
         string prefix = NormalizeFolderPrefix(folder);
         if (prefix == null)
         {
@@ -62,6 +80,7 @@ public static class GameZipManager
             }
         }
         return release.Count;
+        }
     }
 
     /// <summary>
@@ -71,6 +90,8 @@ public static class GameZipManager
     /// </summary>
     public static int OpenZipsUnder(string folder)
     {
+        lock (SyncRoot)
+        {
         if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
         {
             return 0;
@@ -105,6 +126,7 @@ public static class GameZipManager
             Zips.InsertRange(0, opened);
         }
         return opened.Count;
+        }
     }
 
     private static bool ContainsZip(string path)
@@ -120,6 +142,11 @@ public static class GameZipManager
             }
         }
         return false;
+    }
+
+    public static bool HasZip(string path)
+    {
+        lock (SyncRoot) return ContainsZip(path);
     }
 
     private static string GetZipName(ZipFile zip)

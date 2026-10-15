@@ -401,6 +401,15 @@ public static class ClientDataUpdater
         {
             ResetSummary();
             yield return Program.I().StartCoroutine(DataPhase(force, userInitiated));
+            yield return Program.I().StartCoroutine(CardScriptUpdater.Repair(Root));
+            if (CardScriptUpdater.Added > 0)
+                SummaryDataNames.Add("效果脚本 " + CardScriptUpdater.Added + " 个");
+            if (!string.IsNullOrEmpty(CardScriptUpdater.LastError))
+            {
+                State = UpdateState.Failed;
+                LastError = string.IsNullOrEmpty(LastError) ? CardScriptUpdater.LastError
+                    : LastError + "；" + CardScriptUpdater.LastError;
+            }
             // 数据阶段失败也照样查卡图：两者是各自独立的缺件（cdb 坏了不代表图也坏），
             // 而且抓不到卡表时用户最想要的恰恰是先把图补上。
             // 唯一副作用：PicsPhase 收尾会把 State 打成 Ready，会冲掉右上角
@@ -554,15 +563,11 @@ public static class ClientDataUpdater
 
     // ── 卡图阶段 ────────────────────────────────────────────────────────────
 
-    /// <summary>负缓存文件：CDN 上确认没有图的卡码（一行一个）。放 picture/card/ 里，
+    /// <summary>负缓存文件：CDN 上确认没有图的卡码与逐条时间戳。放 picture/card/ 里，
     /// GameTextureManager 只按精确路径取图，不会列举目录，点开头文件对它不可见。</summary>
-    const string AbsentPicsFile = "picture/card/.picsync-absent.txt";
+    const string AbsentPicsFile = "picture/card/.picsync-absent-v2.txt";
 
-    /// <summary>负缓存有效期（天）：CDN 后来补上的新图不能被一次「暂无」永久遮蔽。
-    /// 超期即视为空集重探，重探后 SaveAbsentPics 会刷新文件 mtime。</summary>
-    const int AbsentCacheTtlDays = 30;
-
-    /// <summary>卡图连续失败到此数且一张未成功 ⇒ 判定网络不通，提前退出（不空打上千张 HEAD）。</summary>
+    /// <summary>连续临时失败达到上限时停止领取新任务，避免断网后持续空打请求。</summary>
     const int PicsNetworkGiveUpStreak = 5;
 
     /// <summary>测试开关文件名：存在（且 qt_debug.on 开）时其内容替换卡图下载根 ——
@@ -622,7 +627,7 @@ public static class ClientDataUpdater
     ///   ③ 缺的逐张 DownloadFileWithHeadCheck（HEAD+ETag 判重，落 picture/card/&lt;码&gt;.jpg）；
     ///   ④ CDN 上确认没有的记负缓存，之后启动不再探测；卡片库刚更新过 / 强制更新时清缓存重探
     ///     （CDN 可能补了新图）。
-    /// 单张失败不判整体失败（图是加法资产）。全失败视为网络问题、不写负缓存。
+    /// 404/410 才进入负缓存；临时网络或写盘失败不进入缓存。
     /// </summary>
     static IEnumerator PicsPhase(bool force, bool userInitiated)
     {
@@ -669,57 +674,92 @@ public static class ClientDataUpdater
             yield break;
         }
 
-        int okCount = 0;
-        int consecutiveFail = 0;
-        List<string> newlyAbsent = new List<string>();
-        for (int i = 0; i < missing.Count; i++)
+        var job = new PicsJob { missing = missing, root = root };
+#if UNITY_ANDROID && !UNITY_EDITOR
+        int lanes = Math.Min(8, missing.Count);
+#else
+        int lanes = Math.Min(4, missing.Count);
+#endif
+        for (int lane = 0; lane < lanes; lane++) Program.I().StartCoroutine(PicsLane(job));
+        while (job.workersDone < lanes) yield return null;
+        int okCount = job.okCount;
+        List<string> newlyAbsent = job.newlyAbsent;
+
+        SetState(UpdateState.Ready, "", 1f);
+        SummaryPicsRan = true;
+        SummaryPicsTotal = haveCount + okCount + job.alreadyPresent;
+        SummaryPicsAdded = okCount;
+        SummaryPicsAbsent = newlyAbsent.Count;
+        SummaryPicsFailed = job.failedCount > 0;
+        if (newlyAbsent.Count > 0) SaveAbsentPics(newlyAbsent);
+        QuickTestTrace.Log("pics", "done ok=" + okCount + " absentNew=" + newlyAbsent.Count
+            + " temporaryFailures=" + job.failedCount);
+    }
+
+    // 所有通道均为主线程协程；限并发，临时失败暂停，离开菜单时停止取新号。
+    class PicsJob
+    {
+        public List<string> missing;
+        public string root;
+        public int nextIndex, finished, workersDone, okCount, alreadyPresent;
+        public int consecutiveFail, failedCount;
+        public bool giveUp;
+        public List<string> newlyAbsent = new List<string>();
+    }
+
+    static IEnumerator PicsLane(PicsJob job)
+    {
+        try
         {
-            string code = missing[i];
-            SetState(UpdateState.Downloading, "卡图", (float)i / missing.Count);
+          while (!job.giveUp && job.nextIndex < job.missing.Count)
+          {
+            while (Program.I().menu != null && !Program.I().menu.isShowed) yield return null;
+            if (job.giveUp || job.nextIndex >= job.missing.Count) break;
+            string code = job.missing[job.nextIndex++];
+            if (HasLocalPicture(code))
+            {
+                job.alreadyPresent++;
+                job.finished++;
+                continue;
+            }
+            SetState(UpdateState.Downloading, "卡图", (float)job.finished / job.missing.Count);
             bool success = false;
+            long responseCode = 0;
             yield return Program.I().StartCoroutine(UnityFileDownloader.DownloadFileWithHeadCheck(
-                root + "pics/" + code + ".jpg",
+                job.root + "pics/" + code + ".jpg",
                 LocalPath("picture/card/" + code + ".jpg"),
                 delegate (bool s) { success = s; },
                 null,
                 null,
                 null,
                 null,
-                forceDownload: true));
+                forceDownload: true,
+                onHttpResponse: status => { responseCode = status; },
+                preserveExistingFile: () => HasLocalPicture(code)));
             if (success)
             {
-                okCount++;
-                consecutiveFail = 0;
+                job.okCount++;
+                job.consecutiveFail = 0;
             }
             else
             {
-                newlyAbsent.Add(code);
-                consecutiveFail++;
-                // 一张都没成、还连着失败 N 张 = 判定网络不通。继续对着上千张卡空打 HEAD
-                // 只会白等（新装机 + 外网挂的典型场景），提前收工、且不写负缓存。
-                if (okCount == 0 && consecutiveFail >= PicsNetworkGiveUpStreak)
+                if (PictureAbsentCache.ShouldRememberMissing(success, responseCode))
                 {
-                    QuickTestTrace.Log("pics", "giveup streak=" + consecutiveFail
-                        + " ok=0（判定网络不通，提前退出，不写负缓存）");
-                    break;
+                    job.newlyAbsent.Add(code);
+                    job.consecutiveFail = 0;
+                }
+                else
+                {
+                    job.failedCount++;
+                    job.consecutiveFail++;
+                    if (job.consecutiveFail >= PicsNetworkGiveUpStreak) job.giveUp = true;
                 }
             }
+            job.finished++;
+            SetState(UpdateState.Downloading, "卡图", (float)job.finished / job.missing.Count);
+          }
         }
-
-        SetState(UpdateState.Ready, "", 1f);
-        SummaryPicsRan = true;
-        SummaryPicsTotal = haveCount + okCount;   // 扫完 + 补完之后的「真有图张数」
-        SummaryPicsAdded = okCount;
-        SummaryPicsAbsent = newlyAbsent.Count;
-        SummaryPicsFailed = (okCount == 0 && newlyAbsent.Count > 0);
-        QuickTestTrace.Log("pics", "done ok=" + okCount + " absentNew=" + newlyAbsent.Count
-            + (newlyAbsent.Count > 0 ? " absentCodes=" + string.Join(",", newlyAbsent.GetRange(0, Math.Min(5, newlyAbsent.Count)).ToArray())
-                + (newlyAbsent.Count > 5 ? "…" : "") : ""));
-        // 全失败 = 大概率网络不通，负缓存会把「其实有图只是没网」的卡错记成没有 ⇒ 不写。
-        if (newlyAbsent.Count > 0 && okCount > 0)
-        {
-            SaveAbsentPics(newlyAbsent);
-        }
+        finally { job.workersDone++; }
     }
 
     /// <summary>读盘上 cdb 的全部卡码（datas.id，字符串化）。失败返回 null。</summary>
@@ -832,24 +872,7 @@ public static class ClientDataUpdater
         try
         {
             string path = LocalPath(AbsentPicsFile);
-            if (File.Exists(path))
-            {
-                // TTL：超期就把「暂无图」的结论作废、整份重探（CDN 可能已经补上了图）。
-                if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalDays > AbsentCacheTtlDays)
-                {
-                    QuickTestTrace.Log("pics", "absentCache expired（超 " + AbsentCacheTtlDays + " 天，忽略重探）");
-                    return set;
-                }
-                string[] lines = File.ReadAllLines(path);
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    string s = lines[i].Trim();
-                    if (s.Length > 0)
-                    {
-                        set.Add(s);
-                    }
-                }
-            }
+            set.UnionWith(PictureAbsentCache.Read(path, DateTime.UtcNow).Keys);
         }
         catch (Exception e)
         {
@@ -862,25 +885,19 @@ public static class ClientDataUpdater
     {
         try
         {
-            HashSet<string> merged = LoadAbsentPics();
-            for (int i = 0; i < newlyAbsent.Count; i++)
-            {
-                merged.Add(newlyAbsent[i]);
-            }
-            List<string> all = new List<string>(merged);
-            all.Sort();
             string path = LocalPath(AbsentPicsFile);
-            string dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-            File.WriteAllLines(path, all.ToArray());
+            PictureAbsentCache.Save(path, newlyAbsent, DateTime.UtcNow);
         }
         catch (Exception e)
         {
             Program.DEBUGLOG(e);
         }
+    }
+
+    static bool HasLocalPicture(string code)
+    {
+        return File.Exists(LocalPath("picture/card/" + code + ".png"))
+            || File.Exists(LocalPath("picture/card/" + code + ".jpg"));
     }
 
     /// <summary>数据已落盘，重载内存里的三件套并提交事务。菜单每帧调用来兑现挂起的重载。</summary>

@@ -164,12 +164,7 @@ public class AIRoom : WindowServantSP
         // 这里显式杀掉，把「谁连上了新服务器」这件事变成确定的。
         KillQuietly(botProcess);
         botProcess = null;
-        if (serverProcess != null && !serverProcess.HasExited)
-        {
-            serverProcess.Kill();
-            // Kill 是异步的：不等它真的退出，紧接着新起的那个进程可能还抢不到端口。
-            try { serverProcess.WaitForExit(3000); } catch (System.Exception) { }
-        }
+        KillQuietly(serverProcess);
         serverProcess = null;
         IsAiSessionLive = false;
         // 撤回用的时间线到此为止。launch() 一上来也会调这里，于是「开新局」= 先收上一条。
@@ -426,6 +421,7 @@ public class AIRoom : WindowServantSP
         private readonly System.Collections.Generic.List<string> recent
             = new System.Collections.Generic.List<string>();
         private const int RecentMax = 60;
+        private int remainingPumps = 2;
 
         public void Start(System.Diagnostics.Process proc, string logPath)
         {
@@ -452,6 +448,7 @@ public class AIRoom : WindowServantSP
             catch (System.Exception)
             {
                 // 老产物没重定向 stderr 时 StandardError 访问会抛 —— 那就只泵 stdout。
+                PumpCompleted();
             }
         }
 
@@ -486,9 +483,24 @@ public class AIRoom : WindowServantSP
                 catch (System.Exception)
                 {
                 }
+                finally
+                {
+                    // stdout/stderr 共用一个日志：两根管道都结束后再关闭。
+                    PumpCompleted();
+                }
             });
             t.IsBackground = true;
             t.Start();
+        }
+
+        private void PumpCompleted()
+        {
+            if (Interlocked.Decrement(ref remainingPumps) != 0) return;
+            lock (gate)
+            {
+                try { if (writer != null) writer.Dispose(); } catch { }
+                writer = null;
+            }
         }
 
         /// <summary>等第一行，超时返回 false（绝不再无限阻塞）。</summary>
@@ -537,6 +549,10 @@ public class AIRoom : WindowServantSP
         }
         catch (System.Exception)
         {
+        }
+        finally
+        {
+            try { proc.Dispose(); } catch { }
         }
     }
 
@@ -1106,6 +1122,14 @@ public static class QuickTestTrace
 
     private static string fileName = null;
     private static int enabled = -1;   // -1 未知 / 0 关 / 1 开
+    public static void ResetForCurrentDirectory()
+    {
+        fileName = null;
+        enabled = -1;
+        switchStale.Clear();
+        switchMissingAt.Clear();
+    }
+
     // （原 dirReady latch 已删：见 LogPath 注释 —— 一次性成功 latch 会把「cwd 还没设好时
     //   建错位置/建失败」固化成永久静默。）
 

@@ -499,7 +499,12 @@ public class selectDeck : WindowServantSP
         base.show();
         printFile();
         superScrollView.toTop();
-        superScrollView.selectedString = GameModeManager.DeckInUse;
+        string remembered = GameModeManager.DeckInUse;
+        if (File.Exists(GameModeManager.DeckPath(remembered)))
+            superScrollView.selectedString = remembered;
+        else if (!superScrollView.Selected())
+            superScrollView.selectTop();
+        deckSelected = superScrollView.selectedString ?? "";
         printSelected();
         Program.charge();
     }

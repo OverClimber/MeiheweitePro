@@ -194,35 +194,34 @@ public static class UIHelper
         returnValue[2] = new Texture2D(textureField.width, textureField.height);
         float zuo = (float)textureField.width * 69f / 320f;
         float you = (float)textureField.width * 247f / 320f;
+        Color32[] pixels = textureField.GetPixels32();
+        Color32[][] slices = { new Color32[pixels.Length], new Color32[pixels.Length], new Color32[pixels.Length] };
         for (int w = 0; w < textureField.width; w++)
         {
             for (int h = 0; h < textureField.height; h++)
             {
-                Color c = textureField.GetPixel(w, h);
-                if (c.a < 0.05f)
+                int index = h * textureField.width + w;
+                Color32 c = pixels[index];
+                if (c.a < 13)
                 {
                     c.a = 0;
                 }
                 if (w < zuo)
                 {
-                    returnValue[0].SetPixel(w, h, c);
-                    returnValue[1].SetPixel(w, h, new Color(0, 0, 0, 0));
-                    returnValue[2].SetPixel(w, h, new Color(0, 0, 0, 0));
+                    slices[0][index] = c;
                 }
                 else if (w > you)
                 {
-                    returnValue[2].SetPixel(w, h, c);
-                    returnValue[0].SetPixel(w, h, new Color(0, 0, 0, 0));
-                    returnValue[1].SetPixel(w, h, new Color(0, 0, 0, 0));
+                    slices[2][index] = c;
                 }
                 else
                 {
-                    returnValue[1].SetPixel(w, h, c);
-                    returnValue[0].SetPixel(w, h, new Color(0, 0, 0, 0));
-                    returnValue[2].SetPixel(w, h, new Color(0, 0, 0, 0));
+                    slices[1][index] = c;
                 }
             }
         }
+        for (int i = 0; i < returnValue.Length; i++) returnValue[i].SetPixels32(slices[i]);
+        UnityEngine.Object.Destroy(textureField);
         returnValue[0].Apply();
         returnValue[1].Apply();
         returnValue[2].Apply();

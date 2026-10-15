@@ -117,6 +117,7 @@ public class Setting : WindowServant2D
         // 与行位无关，但放在最后能让日志里的行位数字是最终态。
         RefreshTranslationPackRow();
         RefreshLockDescRow();
+        PlaceHiddenWindow();
     }
 
     /// <summary>

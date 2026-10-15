@@ -109,12 +109,22 @@ public class MonoCardInDeckManager : MonoBehaviour
                 ico.show(3);
             }
         }
+    }
+
+    // Run after the camera/input update and tween updates. The release handler
+    // samples the pointer separately, so script execution order cannot move a drop.
+    void LateUpdate()
+    {
+        if (!dragPending) return;
+        UpdateDragIntent();
         if (isDraging)
-        {
-            // 幽灵卡跟手：鼠标射线与 y=4 水平面的交点做指数趋近。
-            // 纯数学，没有刚体、没有力、没有碰撞。
-            gameObject.transform.position += (getGoodPosition(4) - gameObject.transform.position) * 0.3f;
-        }
+            transform.position = Vector3.Lerp(transform.position, getGoodPosition(4),
+                DeckDragGeometry.FollowFactor(Time.unscaledDeltaTime));
+    }
+
+    void OnApplicationFocus(bool focus)
+    {
+        if (!focus && dragPending) Program.I().deckManager.CancelCardDrag();
     }
 
     /// <summary>把这张卡从卡组里拿掉（丢弃）。纯逻辑移除，不再用 AddForce 甩出去。</summary>
@@ -144,32 +154,55 @@ public class MonoCardInDeckManager : MonoBehaviour
     /// </summary>
     public Vector3 getGoodPosition(float height)
     {
-        float x = Input.mousePosition.x;
-        float y = Input.mousePosition.y;
-        Vector3 to_ltemp = Program.camera_game_main.ScreenToWorldPoint(new Vector3(x, y, 1));
-        Vector3 dv = to_ltemp - Program.camera_game_main.transform.position;
-        if (dv.y == 0) dv.y = 0.01f;
-        to_ltemp.x = ((height - Program.camera_game_main.transform.position.y)
-            * (dv.x) / dv.y + Program.camera_game_main.transform.position.x);
-        to_ltemp.y = ((height - Program.camera_game_main.transform.position.y)
-            * (dv.y) / dv.y + Program.camera_game_main.transform.position.y);
-        to_ltemp.z = ((height - Program.camera_game_main.transform.position.y)
-            * (dv.z) / dv.y + Program.camera_game_main.transform.position.z);
-        return to_ltemp;
+        Vector3 point;
+        return Program.camera_game_main != null
+            && DeckDragGeometry.TryProject(Program.camera_game_main.ScreenPointToRay(Input.mousePosition), height, out point)
+            ? point : transform.position;
     }
 
-    bool isDraging = false;
+    bool isDraging;
+    bool dragPending;
+    bool hasLanded;
+    Vector2 pointerDown;
+    public bool IsDragging { get { return isDraging; } }
 
-    public void beginDrag()
+    public bool UpdateDragIntent()
     {
+        if (dragPending && !isDraging
+            && DeckDragGeometry.Moved(pointerDown, Input.mousePosition, Screen.height)) StartDragging();
+        return isDraging;
+    }
+
+    public bool TryGetDropPosition(out Vector3 point)
+    {
+        point = transform.position;
+        return Program.camera_game_main != null
+            && DeckDragGeometry.TryProject(Program.camera_game_main.ScreenPointToRay(Input.mousePosition), 0.6f, out point);
+    }
+
+    public void beginDrag(bool immediate = false)
+    {
+        pointerDown = Input.mousePosition;
+        dragPending = true;
+        // Android already disambiguates touch taps/drags before synthesizing down.
+        if (immediate || (Application.isMobilePlatform && Program.InputGetMouseButton_0)) StartDragging();
+    }
+
+    void StartDragging()
+    {
+        if (isDraging) return;
         isDraging = true;
-        SetPickable(true);
-        Program.go(1, () => { iTween.RotateTo(gameObject, new Vector3(90, 0, 0), 0.6f); });
+        iTween.Stop(gameObject, "move");
+        iTween.Stop(gameObject, "rotate");
+        SetPickable(false);
+        iTween.RotateTo(gameObject, new Vector3(90, 0, 0), 0.12f);
     }
 
     public void endDrag()
     {
+        dragPending = false;
         isDraging = false;
+        SetPickable(hasLanded && !dying);
     }
 
     /// <summary>
@@ -182,13 +215,16 @@ public class MonoCardInDeckManager : MonoBehaviour
     public void tweenToVectorAndFall(Vector3 position, Vector3 rotation, float delay = 0)
     {
         slotTarget = position;
-        SetPickable(false);
+        iTween.Stop(gameObject, "move");
+        iTween.Stop(gameObject, "rotate");
+        // Already-landed cards can be picked up again during a snap animation.
+        SetPickable(hasLanded && !isDraging);
         iTween.MoveTo(gameObject, iTween.Hash(
                             "delay", delay,
                             "x", position.x,
                             "y", position.y,
                             "z", position.z,
-                            "time", 0.25f,
+                            "time", 0.15f,
                             "easeType", "easeOutQuad",
                             "oncomplete", (Action)onLand
                             ));
@@ -197,13 +233,14 @@ public class MonoCardInDeckManager : MonoBehaviour
                           "x", rotation.x,
                           "y", rotation.y,
                           "z", rotation.z,
-                          "time", 0.2f
+                          "time", 0.12f
                           ));
     }
 
     void onLand()
     {
-        SetPickable(true);
+        hasLanded = true;
+        SetPickable(!isDraging && !dying);
     }
 
     public bool getIfAlive()

@@ -424,6 +424,7 @@ public static class DuelUndo
         // 从这里开始，旧连接的残留 GameMsg 一律丢掉，直到新一局自己的 Start 到达。
         awaitingRestartStart = true;
         sessionStartMs = Program.TimePassed();
+        progressClock.Restart();
         // 遮罩先上：本地回溯是「一口气重放几百条消息」，会占掉一点时间，
         // 遮罩盖住这一段，玩家不会看到界面在中间抽一下。
         ShowMask();
@@ -480,6 +481,7 @@ public static class DuelUndo
         EnterChatQuiet();      // 同 BeginSession：重开期的台词不上屏
         awaitingRestartStart = true;
         sessionStartMs = Program.TimePassed();
+        progressClock.Restart();
         // 遮罩要盖：服务器重开 + 追赶需要时间，这段画面不动（但已是目标态，不是旧观感的「重演」）。
         ShowMask();
 
@@ -508,7 +510,7 @@ public static class DuelUndo
     private static void RewindLocally()
     {
         int seq = ++rewindSeq;
-        int ms = Program.TimePassed();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         rebuildSession = true;
         try
         {
@@ -525,7 +527,7 @@ public static class DuelUndo
             rebuildSession = false;
         }
         QuickTestTrace.Log("undo", "rewind#" + seq + " upTo=" + rebuildUpTo
-            + " took=" + (Program.TimePassed() - ms) + "ms");
+            + " took=" + clock.ElapsedMilliseconds + "ms");
     }
 
     /// <summary>
@@ -563,15 +565,8 @@ public static class DuelUndo
         selfDisconnect = true;
         try
         {
-            if (TcpHelper.tcpClient != null)
-            {
-                if (TcpHelper.tcpClient.Connected)
-                {
-                    TcpHelper.tcpClient.Client.Shutdown(0);
-                    TcpHelper.tcpClient.Close();
-                }
-                TcpHelper.tcpClient = null;
-            }
+            // 同步摘掉连接代次并取消收发线程，旧连接事件不能污染新局。
+            TcpHelper.Disconnect(false);
         }
         catch (Exception e)
         {
@@ -719,6 +714,7 @@ public static class DuelUndo
             // 分叉那条按正常路径走：模型已经按「到 idx-1 为止」重建过，正合适。
             return false;
         }
+        progressClock.Restart();
         return true;
     }
 
@@ -809,10 +805,10 @@ public static class DuelUndo
         {
             return null;
         }
-        // 兜底：重建总时长超过上限就放弃这次撤回，把控制权交还玩家并撤掉遮罩。
+        // Only a stalled replay times out. A long validated prefix may take longer. 
         // 「卡住」是用户对旧撤回最不满的一点，任何等不到服务器/机器人的情况
         // 都不能让玩家对着遮罩干等 —— 宁可这次不撤，也不许卡。
-        if (sessionStartMs > 0 && Program.TimePassed() - sessionStartMs > SessionTimeoutMs)
+        if (progressClock.IsRunning && progressClock.ElapsedMilliseconds > SessionTimeoutMs)
         {
             Fail("回溯超时（服务器没有跟上），已取消本次撤回。");
             return null;
@@ -842,6 +838,12 @@ public static class DuelUndo
             DuelTimeline.Decision d = saved.decisions[replayedDecisions];
             if (DuelTimeline.inbound.Count < d.inboundCount)
             {
+                return null;
+            }
+            if (DuelTimeline.inbound.Count != d.inboundCount
+                || DuelTimeline.digest != d.digestAtResponse)
+            {
+                Fail("回溯应答边界不一致，已停止重放。");
                 return null;
             }
             int index = replayedDecisions;
@@ -893,6 +895,13 @@ public static class DuelUndo
         {
             Program.I().ocgcore.realize();
             Program.I().ocgcore.toNearest();
+            // Whole-stream replay swallowed its final outstanding request.
+            // Recreate only that request after leaving silence; otherwise its
+            // controls/automatic response were suppressed during rebuilding.
+            if (replayWholeDuel && saved != null && saved.inbound.Count > 0
+                && (saved.decisions.Count == 0
+                    || saved.decisions[saved.decisions.Count - 1].inboundCount < saved.inbound.Count))
+                Program.I().ocgcore.RestorePendingReplayRequest(saved.MakePackage(saved.inbound.Count - 1));
         }
         catch (Exception e)
         {
@@ -988,8 +997,9 @@ public static class DuelUndo
     // 生命周期：只在「确认回溯」后的真重开+追赶期间显示（BeginSession / ConfirmFromPreview 开，
     // OnFork 降级 / Finish / Fail / Reset 关）—— **预览期没有遮罩**（四键要能点、盘面要看得清）。
 
-    /// <summary>重建的时长上限（毫秒）。超过就放弃本次撤回，免得玩家对着遮罩干等。</summary>
+    /// <summary>连续没有校验进展的上限；长局持续追赶时不按总时长误判。</summary>
     private const int SessionTimeoutMs = 25000;
+    private static readonly System.Diagnostics.Stopwatch progressClock = new System.Diagnostics.Stopwatch();
 
     private static float sessionStartMs = 0f;
     private static GameObject maskRoot = null;

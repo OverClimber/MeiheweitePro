@@ -25,7 +25,10 @@ public enum GameTextureType
 
 public class GameTextureManager
 {
-    static bool bLock = false;
+    static readonly object queueSync = new object();
+    static readonly AutoResetEvent loadSignal = new AutoResetEvent(false);
+    static readonly Queue<PictureResource> completed = new Queue<PictureResource>();
+    static int cacheGeneration;
 
     static Stack<PictureResource> waitLoadStack = new Stack<PictureResource>();
 
@@ -110,46 +113,53 @@ public class GameTextureManager
 
     public static void clearUnloaded()
     {
-        while (true)
+        lock (queueSync)
         {
-            try
-            {
-                while (waitLoadStack.Count > 0)
-                {
-                    var a = waitLoadStack.Pop();
-                    addedMap.Remove((UInt64)a.type << 32 | (UInt64)a.code);
-                }
-                break;
-            }
-            catch (Exception e)
-            {
-                Thread.Sleep(10);
-                Debug.Log(e);
-            }
+            cacheGeneration++;
+            waitLoadStack.Clear();
+            completed.Clear();
+            addedMap.Clear();
+            foreach (ulong key in loadedList.Keys) addedMap[key] = true;
         }
     }
 
     public static void clearAll()
     {
-        while (true)
+        lock (queueSync)
         {
-            try
+            cacheGeneration++;
+            waitLoadStack.Clear();
+            completed.Clear();
+            loadedList.Clear();
+            addedMap.Clear();
+        }
+    }
+
+    static void Publish(PictureResource picture)
+    {
+        lock (queueSync)
+            if (picture.generation == cacheGeneration) completed.Enqueue(picture);
+    }
+
+    // loadedList 由主线程管理；后台只提交已完成的 CPU 数据。
+    static void DrainCompleted()
+    {
+        lock (queueSync)
+        {
+            while (completed.Count > 0)
             {
-                waitLoadStack.Clear();
-                loadedList.Clear();
-                addedMap.Clear();
-                break;
-            }
-            catch (Exception e)
-            {
-                Thread.Sleep(10);
-                Debug.Log(e);
+                PictureResource picture = completed.Dequeue();
+                if (picture.generation == cacheGeneration)
+                    loadedList[hashPic(picture.code, picture.type)] = picture;
             }
         }
     }
 
     private class PictureResource
     {
+        public int generation;
+        public readonly string cardDirectory, closeupDirectory;
+        public readonly bool isRD;
         public GameTextureType type;
         public long code;
         public bool pCard = false;
@@ -163,6 +173,9 @@ public class GameTextureManager
             type = t;
             code = c;
             nullReturen = n;
+            cardDirectory = GameModeManager.CardPictureDir;
+            closeupDirectory = GameModeManager.CloseupPictureDir;
+            isRD = GameModeManager.IsRD;
         }
     }
 
@@ -249,71 +262,26 @@ public class GameTextureManager
     {
         while (Program.Running)
         {
+            PictureResource pic = null;
+            lock (queueSync)
+                if (waitLoadStack.Count > 0) pic = waitLoadStack.Pop();
+            if (pic == null)
+            {
+                loadSignal.WaitOne(100);
+                continue;
+            }
             try
             {
-                Thread.Sleep(50);
-                int thu = 0;
-                while (waitLoadStack.Count > 0)
-                {
-                    thu++;
-                    if (thu==10)    
-                    {
-                        Thread.Sleep(50);
-                        thu = 0;
-                    }
-                    if (bLock==false)
-                    {
-                        PictureResource pic;
-
-                        pic = waitLoadStack.Pop();
-                        try
-                        {
-                            pic.pCard = (YGOSharp.CardsManager.Get((int)pic.code).Type & (int)CardType.Pendulum) > 0;
-                        }
-                        catch (Exception e)
-                        {
-                            Debug.Log("e 0" + e.ToString());
-                        }
-                        if (pic.type == GameTextureType.card_feature)
-                        {
-                            try
-                            {
-                                ProcessingCardFeature(pic);
-                            }
-                            catch (Exception e)
-                            {
-                                Debug.Log("e 1" + e.ToString());
-                            }
-                        }
-                        if (pic.type == GameTextureType.card_picture)
-                        {
-                            try
-                            {
-                                ProcessingCardPicture(pic);
-                            }
-                            catch (Exception e)
-                            {
-                                Debug.Log("e 2" + e.ToString());
-                            }
-                        }
-                        if (pic.type == GameTextureType.card_verticle_drawing
-                            || pic.type == GameTextureType.card_verticle_drawing_single)
-                        {
-                            try
-                            {
-                                ProcessingVerticleDrawing(pic);
-                            }
-                            catch (Exception e)
-                            {
-                                Debug.Log("e 3" + e.ToString());
-                            }
-                        }
-                    }
-                }
+                if (pic.type == GameTextureType.card_feature) ProcessingCardFeature(pic);
+                else if (pic.type == GameTextureType.card_picture) ProcessingCardPicture(pic);
+                else ProcessingVerticleDrawing(pic);
             }
-            catch (Exception e) 
+            catch (Exception e)
             {
-                Debug.Log("erroe 1" + e.ToString());
+                lock (queueSync)
+                    if (pic.generation == cacheGeneration)
+                        addedMap.Remove(hashPic(pic.code, pic.type));
+                Debug.LogError("[卡图加载] " + pic.code + ": " + e);
             }
         }
     }
@@ -326,29 +294,16 @@ public class GameTextureManager
         // 🔑 单体立绘变体（card_verticle_drawing_single）：先查 {code}_2.png；
         //   资源没铺 _2 的卡（L/R 部件、普通卡）回落到 {code}.png —— 宽幅极大立绘
         //   总比空白卡背好。极大状态（挂素材）恒用 {code}.png，不走这里。
-        foreach (ZipFile zip in GameZipManager.Zips)
+        byte[] closeup = GameZipManager.ReadImage("closeup", code + (singleVariant ? "_2" : ""));
+        if (closeup != null)
         {
-            if (zip.Name.ToLower().EndsWith("script.zip"))
-                continue;
-            foreach (string file in zip.EntryFileNames)
-            {
-                if (Regex.IsMatch(file.ToLower(), "closeup/" + code + (singleVariant ? "_2" : "") + "\\.png$"))
-                {
-                    MemoryStream ms = new MemoryStream();
-                    ZipEntry e = zip[file];
-                    e.Extract(ms);
-                    bitmap = new BitmapHelper(ms);
-                    found = true;
-                    break;
-                }
-            }
-            if (found)
-                break;
+            using (var stream = new MemoryStream(closeup)) bitmap = new BitmapHelper(stream);
+            found = true;
         }
         if (!found)
         {
             // 立绘目录同样按模式走（RD 的立绘随包在 rd/picture/closeup/）。
-            string path = GameModeManager.CloseupPictureDir + "/" + code + (singleVariant ? "_2" : "") + ".png";
+            string path = pic.closeupDirectory + "/" + code + (singleVariant ? "_2" : "") + ".png";
             if (File.Exists(path))
             {
                 bitmap = new BitmapHelper(path);
@@ -371,25 +326,12 @@ public class GameTextureManager
     {
         EightEdition = false;
         string code = pic.code.ToString();
-        foreach (ZipFile zip in GameZipManager.Zips)
-        {
-            if (zip.Name.ToLower().EndsWith("script.zip"))
-                continue;
-            foreach (string file in zip.EntryFileNames)
-            {
-                if (Regex.IsMatch(file.ToLower(), "pics/"+code+ "\\.(jpg|png)$"))
-                {
-                    MemoryStream ms = new MemoryStream();
-                    ZipEntry e = zip[file];
-                    e.Extract(ms);
-                    return ms.ToArray();
-                }
-            }
-        }
+        byte[] zipped = GameZipManager.ReadImage("pics", code);
+        if (zipped != null) return zipped;
         // 卡图目录按模式走：OCG → picture/card，RD → rd/picture/card（见 GameModeManager.PictureRoot）。
         // ⚠ 这是「RD 模式下看不到卡图」的根因 —— 原来这里把 "picture/card" 写死，
         //   而 RD 卡图（12xxxxxxxx）铺在 rd/picture/card/，查不到就退化成空白卡背。
-        string cardDir = GameModeManager.CardPictureDir;
+        string cardDir = pic.cardDirectory;
         string path = cardDir + "/" + code + ".png";
         if (!File.Exists(path))
         {
@@ -397,12 +339,12 @@ public class GameTextureManager
         }
         // 8 版卡图是 OCG 的历史素材集，RD 没有这一套 ——
         // RD 侧不回落，否则会拿 OCG 早期版本的图去顶 RD 卡（码域不重叠，实际也查不到，纯白发一次 IO）。
-        if (!File.Exists(path) && !GameModeManager.IsRD)
+        if (!File.Exists(path) && !pic.isRD)
         {
             EightEdition = true;
             path = "picture/cardIn8thEdition/" + code + ".png";
         }
-        if (!File.Exists(path) && !GameModeManager.IsRD)
+        if (!File.Exists(path) && !pic.isRD)
         {
             EightEdition = true;
             path = "picture/cardIn8thEdition/" + code + ".jpg";
@@ -452,10 +394,6 @@ public class GameTextureManager
 
     private static void ProcessingCardFeature(PictureResource pic)
     {
-        if (loadedList.ContainsKey(hashPic(pic.code, pic.type)))
-        {
-            return;
-        }
         bool EightEdition = false;
         BitmapHelper bitmap = getCloseup(pic);
         if (bitmap != null)
@@ -489,7 +427,7 @@ public class GameTextureManager
             }
             caculateK(pic);
 
-            loadedList.Add(hashPic(pic.code, pic.type), pic);
+            Publish(pic);
         }
         else
         {
@@ -507,7 +445,7 @@ public class GameTextureManager
                         pic.hashed_data[w, h, 3] = 0;
                     }
                 }
-                loadedList.Add(hashPic(pic.code, pic.type), pic);
+                Publish(pic);
             }
             else
             {
@@ -541,7 +479,7 @@ public class GameTextureManager
                         pic.hashed_data[w, h, 3] = a * 0.7f;
                     }
                 }
-                loadedList.Add(hashPic(pic.code, pic.type), pic);
+                Publish(pic);
             }
         }
     }
@@ -705,10 +643,6 @@ public class GameTextureManager
 
     private static void ProcessingVerticleDrawing(PictureResource pic)
     {
-        if (loadedList.ContainsKey(hashPic(pic.code, pic.type)))
-        {
-            return;
-        }
         // 🔑 单体立绘变体（RD 极大怪兽本体单独在场）：closeup 优先查 {code}_2.png。
         var bitmap = getCloseup(pic, pic.type == GameTextureType.card_verticle_drawing_single);
         if (bitmap == null)
@@ -780,7 +714,7 @@ public class GameTextureManager
             caculateK(pic);
         }
 
-        loadedList.Add(hashPic(pic.code, pic.type), pic);
+        Publish(pic);
     }
 
     private static void softVtype(PictureResource pic, float si)
@@ -835,17 +769,13 @@ public class GameTextureManager
 
     private static void ProcessingCardPicture(PictureResource pic)
     {
-        if (loadedList.ContainsKey(hashPic(pic.code, pic.type)))
-        {
-            return;
-        }
 
         bool EightEdition;
         var data = getPicture(pic, out EightEdition);
         if (data.Length > 0)
         {
             pic.data = data;
-            loadedList.Add(hashPic(pic.code, pic.type), pic);
+            Publish(pic);
         }
         else
         {
@@ -857,7 +787,7 @@ public class GameTextureManager
             {
                 pic.u_data = myBack;
             }
-            loadedList.Add(hashPic(pic.code, pic.type), pic);
+            Publish(pic);
         }
     }
 
@@ -868,6 +798,7 @@ public class GameTextureManager
 
     public static Texture2D get(long code, GameTextureType type, Texture2D nullReturnValue = null)
     {
+        DrainCompleted();
         try
         {
             PictureResource r;
@@ -890,6 +821,7 @@ public class GameTextureManager
                     re = new Texture2D(400, 600);
                     re.LoadImage(r.data);
                     r.u_data = re;
+                    r.data = null;
                     return re;
                 }
                 if (r.hashed_data != null)
@@ -908,18 +840,24 @@ public class GameTextureManager
                     re.SetPixels(0, 0, width, height, cols);
                     re.Apply();
                     r.u_data = re;
+                    r.hashed_data = null;
                     return re;
                 }
             }
             else
             {
-                if (!addedMap.ContainsKey(hashPic(code, type)))
+                lock (queueSync)
                 {
-                    PictureResource a = new PictureResource(type, code, nullReturnValue);
-                    bLock = true;
-                    waitLoadStack.Push(a);
-                    bLock = false;
-                    addedMap.Add((UInt64)type << 32 | (UInt64)code, true);
+                    if (!addedMap.ContainsKey(hashPic(code, type)))
+                    {
+                        PictureResource a = new PictureResource(type, code, nullReturnValue);
+                        var card = YGOSharp.CardsManager.Get((int)code);
+                        a.pCard = card != null && (card.Type & (int)CardType.Pendulum) > 0;
+                        a.generation = cacheGeneration;
+                        waitLoadStack.Push(a);
+                        addedMap.Add(hashPic(code, type), true);
+                        loadSignal.Set();
+                    }
                 }
             }
         }
@@ -932,6 +870,7 @@ public class GameTextureManager
 
     public static float getK(long code, GameTextureType type)
     {
+        DrainCompleted();
         float ret = 1;
         PictureResource r;
         if (loadedList.TryGetValue(hashPic(code, type), out r))
@@ -1033,6 +972,7 @@ public class GameTextureManager
 
         }
         Thread main = new Thread(thread_run);
+        main.IsBackground = true;
         main.Start();
     }
 }

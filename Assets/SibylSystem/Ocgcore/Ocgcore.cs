@@ -3749,6 +3749,8 @@ public class Ocgcore : ServantWithCardDescription
             //    旧线（被撤掉那一局）的包不用担心混进来：撤回时旧连接断开，
             //    断线处理里已经把包列表清空了。
             TcpHelper.AddRecordLine(p);
+            // The request has passed the digest gate; answer without a frame delay.
+            undoReplayTick();
             return;
         }
         TcpHelper.AddRecordLine(p);
@@ -4927,17 +4929,11 @@ public class Ocgcore : ServantWithCardDescription
         {
             return;
         }
-        // 代发时保持原局的 manual 归属：原局是玩家点的就仍记成人工决策点，
-        // 否则重放会把「撤回点」一个个抹掉，连按撤回就没得退了。
-        autoResponding = !d.manual;
-        try
-        {
-            SendReplayedReturn(d.response);
-        }
-        finally
-        {
-            autoResponding = false;
-        }
+        // The visible model already represents the target. Historical requests never
+        // created controls here: clearing them again costs O(history * scene size).
+        // Record the original message and origin, not currentMessage from the preview.
+        DuelTimeline.NoteResponse(d.message, d.response, d.manual);
+        TcpHelper.CtosMessage_Response(d.response);
     }
 
     /// <summary>Ctrl+Z：与工具条上的撤回按钮同一条路径，只在人机对局里生效。</summary>
@@ -5035,6 +5031,28 @@ public class Ocgcore : ServantWithCardDescription
             + " keys=" + keys.Count + " currentMessageIndex=" + currentMessageIndex);
     }
 
+    public void RestorePendingReplayRequest(Package p)
+    {
+        GameMessage message = (GameMessage)p.Fuction;
+        switch (message)
+        {
+            case GameMessage.SelectBattleCmd: case GameMessage.SelectIdleCmd:
+            case GameMessage.SelectEffectYn: case GameMessage.SelectYesNo:
+            case GameMessage.SelectOption: case GameMessage.SelectCard:
+            case GameMessage.SelectChain: case GameMessage.SelectPlace:
+            case GameMessage.SelectPosition: case GameMessage.SelectTribute:
+            case GameMessage.SortChain: case GameMessage.SelectCounter:
+            case GameMessage.SelectSum: case GameMessage.SelectDisfield:
+            case GameMessage.SortCard: case GameMessage.SelectUnselect:
+            case GameMessage.AnnounceRace: case GameMessage.AnnounceAttrib:
+            case GameMessage.AnnounceCard: case GameMessage.AnnounceNumber:
+                currentMessage = message;
+                practicalizeMessage(p);
+                QuickTestTrace.Log("undo", "restored pending replay request " + message);
+                break;
+        }
+    }
+
     // ── 撤回预览的原地重放（见 DuelUndoPreview）────────────────────────────────
     //
     // 预览落位/取消不再走 hide()+rebuildFromSnapshot（每步全清场重建 = 慢的根源），
@@ -5064,7 +5082,10 @@ public class Ocgcore : ServantWithCardDescription
         currentMessageIndex = -1;
         Program.I().book.clear();
         bool needSwap = gameInfo.swaped;
+        bool oldSkip = inSkiping;
+        bool oldRebuilding = DuelUndo.rebuilding;
         inSkiping = true;
+        DuelUndo.rebuilding = true;
         try
         {
             for (int i = 0; i <= end; i++)
@@ -5098,7 +5119,8 @@ public class Ocgcore : ServantWithCardDescription
         }
         finally
         {
-            inSkiping = false;
+            inSkiping = oldSkip;
+            DuelUndo.rebuilding = oldRebuilding;
         }
         // 清掉残留的选择 UI（卡片选项按钮 / 确认窗 / 阶段碰撞盒），顺带 realize+toNearest；
         // 内部的 gameInfo.removeAll() 会把右侧旧哈希按钮（结束回合等）一并收掉。
@@ -7101,7 +7123,7 @@ public class Ocgcore : ServantWithCardDescription
         // 录像已经保存落地，这一局的包不再需要。不清掉的话收尾路径（onExit → returnTo）
         // 还会再调一次 SaveRecord、按当前时间另写一份 —— 同一局在 replay/ 里留下两个文件。
         TcpHelper.ClearRecordBuffer();
-        onDuelResultConfirmed();
+        onReplayChoiceConfirmed();
     }
 
     void onGiveUpReplay()
@@ -7130,7 +7152,16 @@ public class Ocgcore : ServantWithCardDescription
         // 玩家选了「不留」：这一局的包必须丢掉。不然收尾的 SaveRecord 会凭空再写出一份
         // 新的时间戳录像 —— 「我明明点了放弃，replay 里还是多了一份」就是这么来的。
         TcpHelper.ClearRecordBuffer();
-        onDuelResultConfirmed();
+        onReplayChoiceConfirmed();
+    }
+
+    // 录像窗口只负责结算后的选择，不得落入工具条的投降确认入口。
+    void onReplayChoiceConfirmed()
+    {
+        hideCaculator();
+        if (condition != Condition.duel)
+            return;
+        ConfirmDuelResult(true);
     }
 
     void hideCaculator()
@@ -14131,7 +14162,8 @@ public class Ocgcore : ServantWithCardDescription
         Program.cameraRotation = new Vector3(60, 0, 0);
         Program.camera_game_main.transform.eulerAngles = Program.cameraRotation;
         Program.reMoveCam(getScreenCenter());
-        gameField = new GameField();    
+        if (gameField != null) gameField.dispose();
+        gameField = new GameField();
         if (paused)
         {
             try
@@ -14192,6 +14224,11 @@ public class Ocgcore : ServantWithCardDescription
         }
         paused = false;
         condition = Condition.N;
+        if (gameField != null)
+        {
+            gameField.dispose();
+            gameField = null;
+        }
         base.hide();
     }
 
@@ -15120,6 +15157,11 @@ public class Ocgcore : ServantWithCardDescription
 
     public void onDuelResultConfirmed()
     {
+        ConfirmDuelResult(false);
+    }
+
+    private void ConfirmDuelResult(bool replayChoice)
+    {
         Program.I().room.joinWithReconnect = false;
 
         // ── 「测试直开局」收尾：打完一局直接回卡组编辑器 ────────────────────────
@@ -15176,7 +15218,8 @@ public class Ocgcore : ServantWithCardDescription
             return;
         }
 
-        if (Program.I().room.duelEnded == true || surrended || TcpHelper.tcpClient == null || TcpHelper.tcpClient.Connected == false)
+        if (Program.I().room.duelEnded == true || surrended || TcpHelper.tcpClient == null || TcpHelper.tcpClient.Connected == false
+            || (replayChoice && !Program.I().room.needSide))
         {
             // 打完这一局要回哪个界面，就看这一行：卡组测试局回卡组编辑器（上面那支），
             // 主菜单人机对战回人机界面（returnServant 由 AIRoom.launch 拨向 aiRoom）。

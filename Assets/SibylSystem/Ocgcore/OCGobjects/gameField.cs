@@ -293,6 +293,14 @@ public class GameField : OCGobject
 
     /// <summary>下标即掩码：1=我方、2=对手、3=两侧（0 不用，那档走 <see cref="midBaseTexture"/>）。</summary>
     Texture2D[] maxBandTextures = new Texture2D[4];
+    Texture2D[] ownedFieldTextures = new Texture2D[2];
+    Texture2D[] fallbackFieldTextures;
+    sealed class FieldSlices
+    {
+        public long modified, length;
+        public Texture2D[] textures;
+    }
+    static readonly Dictionary<string, FieldSlices> fieldSlices = new Dictionary<string, FieldSlices>();
 
     /// <summary>当前挂在 <see cref="midT"/> 上的是哪一档（0=基图）。改它只在 <see cref="setMaximumBand"/> 里。</summary>
     int maxBandState = 0;
@@ -491,6 +499,8 @@ public class GameField : OCGobject
         }
         Texture2D me = UIHelper.getTexture2D(MaxBandPathMe);
         Texture2D op = UIHelper.getTexture2D(MaxBandPathOp);
+        try
+        {
         int[] rm = MaxBandRect(0);
         int[] ro = MaxBandRect(1);
         if (me == null || op == null
@@ -529,6 +539,12 @@ public class GameField : OCGobject
             // 框本身（999 空间，y 朝下）—— 与「三格」摆一起报，验收脚本就能一眼看出
             // 「框有没有被算成罩住三格」（那正是第一版错法）。
             + " meFrame=" + FrameStr(0) + " opFrame=" + FrameStr(1));
+        }
+        finally
+        {
+            if (me != null) UnityEngine.Object.Destroy(me);
+            if (op != null) UnityEngine.Object.Destroy(op);
+        }
     }
 
     /// <summary>框的矩形报成 `x0,y0,x1,y1`（999 空间，y 朝下）—— 只给探针/日志用。</summary>
@@ -551,11 +567,28 @@ public class GameField : OCGobject
     /// <summary>两张场地贴图（新/旧）共用的装载：切三片 → 挂上去 → 备大框变体。</summary>
     private void installFieldTextures(string path)
     {
+        ClearFallbackFieldTextures();
         Texture2D midBase = null;
         if (File.Exists(path))
         {
-            Texture2D textureField = UIHelper.getTexture2D(path);
-            Texture2D[] textureFieldSliced = UIHelper.sliceField(textureField);
+            var file = new FileInfo(path);
+            string key = file.FullName;
+            FieldSlices cached;
+            if (!fieldSlices.TryGetValue(key, out cached) || cached.modified != file.LastWriteTimeUtc.Ticks
+                || cached.length != file.Length || cached.textures[0] == null)
+            {
+                Texture2D source = UIHelper.getTexture2D(path);
+                Texture2D[] slices;
+                try { slices = UIHelper.sliceField(source); }
+                finally { if (source != null) UnityEngine.Object.Destroy(source); }
+                if (cached != null)
+                    foreach (Texture2D texture in cached.textures) UnityEngine.Object.Destroy(texture);
+                cached = new FieldSlices { modified = file.LastWriteTimeUtc.Ticks, length = file.Length, textures = slices };
+                fieldSlices[key] = cached;
+                QuickTestTrace.Log("fieldcache", "built " + path);
+            }
+            else QuickTestTrace.Log("fieldcache", "reuse " + path);
+            Texture2D[] textureFieldSliced = cached.textures;
             leftT.mainTexture = textureFieldSliced[0];
             midT.mainTexture = textureFieldSliced[1];
             rightT.mainTexture = textureFieldSliced[2];
@@ -563,11 +596,19 @@ public class GameField : OCGobject
         }
         else
         {
-            leftT.mainTexture = new Texture2D(100, 100);
-            midT.mainTexture = new Texture2D(100, 100);
-            rightT.mainTexture = new Texture2D(100, 100);
+            fallbackFieldTextures = new[] { new Texture2D(100, 100), new Texture2D(100, 100), new Texture2D(100, 100) };
+            leftT.mainTexture = fallbackFieldTextures[0];
+            midT.mainTexture = fallbackFieldTextures[1];
+            rightT.mainTexture = fallbackFieldTextures[2];
         }
         installMaximumBand(midBase);
+    }
+
+    void ClearFallbackFieldTextures()
+    {
+        if (fallbackFieldTextures == null) return;
+        foreach (Texture2D texture in fallbackFieldTextures) UnityEngine.Object.Destroy(texture);
+        fallbackFieldTextures = null;
     }
 
     /// <summary>
@@ -1009,12 +1050,18 @@ public class GameField : OCGobject
 
     public void dispose()
     {
+        ClearFallbackFieldTextures();
         Program.I().ocgcore.RemoveUpdateAction_s(Update);
         // 大框的三张变体是**每局现建**的（`new Texture2D` + `SetPixels32`，各 1024x819 ≈ 3.3MB），
         // 不显式销毁就会随「每局 new GameField()」一路堆积（撤回重开也走这条路）。
         for (int i = 0; i < maxBandTextures.Length; i++)
         {
             destroyMaximumBandTexture(i);
+        }
+        for (int i = 0; i < ownedFieldTextures.Length; i++)
+        {
+            if (ownedFieldTextures[i] != null) UnityEngine.Object.Destroy(ownedFieldTextures[i]);
+            ownedFieldTextures[i] = null;
         }
     }
 
@@ -1284,6 +1331,8 @@ public class GameField : OCGobject
                         }
                         if (tex != null)
                         {
+                            if (ownedFieldTextures[player] != null) UnityEngine.Object.Destroy(ownedFieldTextures[player]);
+                            ownedFieldTextures[player] = tex;
                             UIHelper.getByName<UITexture>(gameObject, "field_" + player.ToString()).mainTexture = tex;
                             UIHelper.clearITWeen(UIHelper.getByName(gameObject, "obj_" + player.ToString()));
                             iTween.ScaleTo(UIHelper.getByName(gameObject, "obj_" + player.ToString()), new Vector3(1, 1, 1), 0.5f);

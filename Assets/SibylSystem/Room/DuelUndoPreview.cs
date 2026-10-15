@@ -185,7 +185,7 @@ public static class DuelUndoPreview
         int keep;
         int upTo;
         CurrentTarget(out keep, out upTo);
-        int ms = Program.TimePassed();
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             Program.I().ocgcore.previewReplayInPlace(snap, upTo);
@@ -196,7 +196,7 @@ public static class DuelUndoPreview
         }
         QuickTestTrace.Log("undo", "preview step cursor=" + (cursor + 1) + "/" + manualIdx.Count
             + " keep=" + keep + " upTo=" + upTo
-            + " took=" + (Program.TimePassed() - ms) + "ms");
+            + " took=" + clock.ElapsedMilliseconds + "ms");
     }
 
     // ── 确认 / 取消 ─────────────────────────────────────────────────────────────
