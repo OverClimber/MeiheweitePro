@@ -1130,7 +1130,21 @@
     "event/include/event2/thread.h": "7cce07633fbc3edcec71c97bece476d19469132bf2afd07fa0f65d9790c37bea",
     "event/include/event2/util.h": "0224bdfc15606a70220dada8c94775d6470704bff5bce7da84d22daafb58cb51",
     "event/compat/sys/queue.h": "5910e7edf1a05f7e9fc5ee9556aac88d1cad102f21dc48fd8806f0b9355d1dc2",
-    "event/android/event2/event-config.h": "d4eac9549352d203afbd02a60d4fc262cec07e7cc3c4581b77df9cc41f599bb7"
+    "event/android/event2/event-config.h": "d4eac9549352d203afbd02a60d4fc262cec07e7cc3c4581b77df9cc41f599bb7",
+    "ocgcore/buffer.h": "0c9b51befe19430176ac60c6d66e712251c8ba33b92a76f8accdb8d03453b5ff",
+    "ocgcore/card.h": "f48b15cca650db50511470a7246182b0d6cc544bf78918560b233931b225adc4",
+    "ocgcore/card_data.h": "616a466047fce41b6e1261d4016e0054523d3c5dd01dc7848d0dc0d32bac9eb3",
+    "ocgcore/common.h": "e9ac0d65ade8eef9385beac75b609946a55acd9b69b275f93212d2185c921cac",
+    "ocgcore/duel.h": "9477fa90d6776b7b7254c9c3c00e9a74aa733f1cec85b7ca9afd005b1681ff12",
+    "ocgcore/effect.h": "f28033db61967630ee95f45d46d53622ecbace5e1db4ee17a488571f64b606cd",
+    "ocgcore/effectset.h": "1c3f42c3ed7096faeb07561bae84fce1721d41ab00aeaa0d5d1f3e8c30f99768",
+    "ocgcore/field.h": "1ebdf799717b1e90895158b87c21de8423b65385cddadd94b9a1f61a810765d4",
+    "ocgcore/group.h": "83c87ba801981a9b5d4524def9b70cf692d5bea1f653e4c1bd00a1556e3755d4",
+    "ocgcore/interpreter.h": "74971ed73d32c3f81ff09f1cd1706f114dbba0d958fa7b59277b893573a18537",
+    "ocgcore/mtrandom.h": "3015fd6857844ca143a428e266f5cd26915579faf733025722bb33f3fabee954",
+    "ocgcore/ocgapi.h": "f7fa27efaf894af2b4c64295466b0c687c5bdf0ec3cf3af1c3f88c786d217f98",
+    "ocgcore/scriptlib.h": "d6cce3cbf9bdc957364cf6d7fa5ed57da93c52a6eb216d1509254eca388f4270",
+    "ocgcore/sort.h": "c20599a1d7f8a994adbc36f94887c3f19c0678d9842110b7368ab807a16e8b56"
   },
   "source_file_sha256": {
     "event/Android.mk": "4dfdde65212323e918cbc0cf736407867059d3d7f71473886866517a646bfad8",
@@ -2262,6 +2276,20 @@
     "event/include/event2/thread.h": "7cce07633fbc3edcec71c97bece476d19469132bf2afd07fa0f65d9790c37bea",
     "event/include/event2/util.h": "0224bdfc15606a70220dada8c94775d6470704bff5bce7da84d22daafb58cb51",
     "event/compat/sys/queue.h": "5910e7edf1a05f7e9fc5ee9556aac88d1cad102f21dc48fd8806f0b9355d1dc2",
-    "event/android/event2/event-config.h": "d4eac9549352d203afbd02a60d4fc262cec07e7cc3c4581b77df9cc41f599bb7"
+    "event/android/event2/event-config.h": "d4eac9549352d203afbd02a60d4fc262cec07e7cc3c4581b77df9cc41f599bb7",
+    "ocgcore/buffer.h": "0c9b51befe19430176ac60c6d66e712251c8ba33b92a76f8accdb8d03453b5ff",
+    "ocgcore/card.h": "f48b15cca650db50511470a7246182b0d6cc544bf78918560b233931b225adc4",
+    "ocgcore/card_data.h": "616a466047fce41b6e1261d4016e0054523d3c5dd01dc7848d0dc0d32bac9eb3",
+    "ocgcore/common.h": "e9ac0d65ade8eef9385beac75b609946a55acd9b69b275f93212d2185c921cac",
+    "ocgcore/duel.h": "9477fa90d6776b7b7254c9c3c00e9a74aa733f1cec85b7ca9afd005b1681ff12",
+    "ocgcore/effect.h": "f28033db61967630ee95f45d46d53622ecbace5e1db4ee17a488571f64b606cd",
+    "ocgcore/effectset.h": "1c3f42c3ed7096faeb07561bae84fce1721d41ab00aeaa0d5d1f3e8c30f99768",
+    "ocgcore/field.h": "1ebdf799717b1e90895158b87c21de8423b65385cddadd94b9a1f61a810765d4",
+    "ocgcore/group.h": "83c87ba801981a9b5d4524def9b70cf692d5bea1f653e4c1bd00a1556e3755d4",
+    "ocgcore/interpreter.h": "74971ed73d32c3f81ff09f1cd1706f114dbba0d958fa7b59277b893573a18537",
+    "ocgcore/mtrandom.h": "3015fd6857844ca143a428e266f5cd26915579faf733025722bb33f3fabee954",
+    "ocgcore/ocgapi.h": "f7fa27efaf894af2b4c64295466b0c687c5bdf0ec3cf3af1c3f88c786d217f98",
+    "ocgcore/scriptlib.h": "d6cce3cbf9bdc957364cf6d7fa5ed57da93c52a6eb216d1509254eca388f4270",
+    "ocgcore/sort.h": "c20599a1d7f8a994adbc36f94887c3f19c0678d9842110b7368ab807a16e8b56"
   }
 }

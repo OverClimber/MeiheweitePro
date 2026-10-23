@@ -35,7 +35,7 @@ jobs:
             -DSERVER_PRO2_SUPPORT -DSERVER_PRO3_SUPPORT \
             -DSERVER_TAG_SURRENDER_CONFIRM \
             -I "$src/ygoserver" -I "$src/ygoserver/spmemvfs" \
-            -I native/ocgcore -I "$src/event/include" \
+            -I "$src/ocgcore" -I "$src/event/include" -I "$src/event/android" \
             -I "$src/sqlite3" -I "$src/irrlicht/source/Irrlicht" \
             -I "$src/irrlicht/include" \
             -c "$src/ygoserver/serverapi.cpp" -o serverapi.o
