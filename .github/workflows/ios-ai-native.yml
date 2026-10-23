@@ -87,5 +87,5 @@ jobs:
             xcrun --sdk iphoneos clang "${common[@]}" -c "$src/source/Irrlicht/zlib/$unit.c" -o "ai-objects/irr-z-$unit.o"
           done
           for unit in os CAttributes CFileList CFileSystem CLimitReadFile CMemoryFile CReadFile CWriteFile CXMLReader CXMLWriter CZipReader; do
-            xcrun --sdk iphoneos clang++ "${common[@]}" -std=c++17 -c "$src/source/Irrlicht/$unit.cpp" -o "ai-objects/irr-$unit.o"
+            xcrun --sdk iphoneos clang++ "${common[@]}" -std=gnu++17 -c "$src/source/Irrlicht/$unit.cpp" -o "ai-objects/irr-$unit.o"
           done
