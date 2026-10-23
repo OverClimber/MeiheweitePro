@@ -1,0 +1,54 @@
+name: iOS unsigned IPA build
+on:
+  push:
+    branches: [ios-cloud-check-*]
+    paths:
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reassemble and authenticate Unity export
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('export-parts')
+          manifest=json.loads((root/'manifest.json').read_text())
+          names=manifest['parts']
+          if names!=sorted(names) or any('/' in n or '\\' in n for n in names):
+              raise SystemExit('Invalid part manifest')
+          with open('xcode-export.zip','xb') as out:
+              for name in names:
+                  out.write((root/name).read_bytes())
+          data=pathlib.Path('xcode-export.zip')
+          if data.stat().st_size!=manifest['size']:
+              raise SystemExit('Archive size mismatch')
+          if hashlib.sha256(data.read_bytes()).hexdigest()!=manifest['sha256']:
+              raise SystemExit('Archive digest mismatch')
+          print('Verified complete Unity Xcode export:',data.stat().st_size)
+          PY
+      - name: Compile OCG and patched Lua for iPhoneOS
+        run: bash native/build_core.sh
+      - name: Xcode device build and pending-signing IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          export EXPORT_ZIP="$PWD/xcode-export.zip"
+          bash native/build_exported_xcode.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-build-result
+          path: |
+            MeiheweitePro-pending-signing.ipa
+            MeiheweitePro-pending-signing.json
+            xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 7
