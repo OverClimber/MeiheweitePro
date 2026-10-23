@@ -41,3 +41,19 @@ jobs:
             -I "$src/irrlicht/include" \
             -c "$src/ygoserver/$unit.cpp" -o "$unit.o"
           done
+      - name: Compile AI server C dependencies for iPhoneOS
+        run: |
+          set -euo pipefail
+          src=native/ai-server
+          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          cc=(xcrun --sdk iphoneos clang -target arm64-apple-ios13.0 -isysroot "$sdk" -O2)
+          mkdir -p ai-objects
+          for unit in Alloc LzFind LzmaDec LzmaEnc LzmaLib; do
+            "${cc[@]}" -c "$src/ygoserver/lzma/$unit.c" -o "ai-objects/lzma-$unit.o"
+          done
+          "${cc[@]}" -I "$src/sqlite3" -c "$src/ygoserver/spmemvfs/spmemvfs.c" -o ai-objects/spmemvfs.o
+          "${cc[@]}" -c "$src/sqlite3/sqlite3.c" -o ai-objects/sqlite3.o
+          for unit in event buffer bufferevent bufferevent_sock bufferevent_pair listener evmap log evutil strlcpy signal bufferevent_filter evthread evthread_pthread bufferevent_ratelim evutil_rand event_tagging http evdns evrpc poll select; do
+            "${cc[@]}" -I "$src/event" -I "$src/event/include" -I "$src/event/compat" -I "$src/event/android" \
+              -c "$src/event/$unit.c" -o "ai-objects/event-$unit.o"
+          done
