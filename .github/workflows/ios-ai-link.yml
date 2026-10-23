@@ -1,0 +1,19 @@
+name: iOS AI complete link
+on:
+  push:
+    branches: [ios-cloud-check-*]
+    paths: ['native/build_ai.sh', '.github/workflows/ios-ai-link.yml']
+permissions:
+  contents: read
+jobs:
+  link:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash native/build_ai.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-ai-native
+          path: native/out/
+          retention-days: 7
