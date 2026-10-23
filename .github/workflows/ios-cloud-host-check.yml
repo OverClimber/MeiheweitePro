@@ -7,6 +7,7 @@ on:
       - 'ios-cloud-check-*'
     paths:
       - '.github/workflows/ios-cloud-host-check.yml'
+      - 'native/**'
 
 permissions:
   contents: read

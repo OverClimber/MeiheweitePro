@@ -7,7 +7,7 @@ flags=(-target arm64-apple-ios13.0 -isysroot "$sdk" -O2 -fvisibility=hidden)
 for source in lua-5.4.8/src/*.c; do
   name="$(basename "$source" .c)"
   [[ "$name" == lua || "$name" == luac ]] && continue
-  xcrun --sdk iphoneos clang++ "${flags[@]}" -x c++ -std=c++17 -DLUA_USE_POSIX -I lua-5.4.8/src -c "$source" -o "out/lua/$name.o"
+  xcrun --sdk iphoneos clang++ "${flags[@]}" -x c++ -std=c++17 -DLUA_USE_IOS -I lua-5.4.8/src -c "$source" -o "out/lua/$name.o"
 done
 for source in ocgcore/*.cpp; do
   name="$(basename "$source" .cpp)"
