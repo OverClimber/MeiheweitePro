@@ -57,6 +57,7 @@ jobs:
                       '_EVENT_HAVE_SENDFILE','_EVENT_HAVE_SYS_SENDFILE_H',
                       '_EVENT_HAVE_NETINET_IN6_H'):
               src=src.replace('#define '+key+' 1', '/* #undef '+key+' */')
+          src=src.replace('/* #undef _EVENT_HAVE_FD_MASK */', '#define _EVENT_HAVE_FD_MASK 1')
           Path('ai-config/event2/event-config.h').write_text(src)
           PY
           for unit in Alloc LzFind LzmaDec LzmaEnc LzmaLib; do
