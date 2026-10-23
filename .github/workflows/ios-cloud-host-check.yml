@@ -1,0 +1,71 @@
+name: iOS cloud host check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ios-cloud-check-*'
+    paths:
+      - '.github/workflows/ios-cloud-host-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-host-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Inspect host and Apple SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos --find clang
+            df -h .
+            echo 'Installed Unity editors (absence does not fail the SDK probe):'
+            if [ -d /Applications/Unity/Hub/Editor ]; then
+              find /Applications/Unity/Hub/Editor -maxdepth 1 -mindepth 1 -type d
+            else
+              echo 'No Unity Hub editor directory'
+            fi
+          } | tee host-report.txt
+      - name: Compile a minimal iPhoneOS arm64 object
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'int MeiheweiteIOSHostProbe(void) { return 1; }' > host-probe.c
+          xcrun --sdk iphoneos clang -target arm64-apple-ios13.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -c host-probe.c -o host-probe.o
+          xcrun nm -gU host-probe.o | tee native-symbols.txt
+          grep -Eq '[[:space:]]_MeiheweiteIOSHostProbe$' native-symbols.txt
+          xcrun otool -l host-probe.o > native-load-commands.txt
+      - name: State validation scope
+        if: always()
+        shell: bash
+        run: |
+          printf '%s\n' \
+            'This job only checks the cloud macOS host and Apple native compiler.' \
+            'No game source, device ID, Unity license or signing credentials are used.' \
+            'A successful probe is not a Unity/IL2CPP build or a runnable IPA.' \
+            'Unity editor compatibility, native runtime, resources and signing remain pending.' \
+            >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-cloud-host-evidence
+          path: |
+            host-report.txt
+            native-symbols.txt
+            native-load-commands.txt
+          if-no-files-found: error
+          retention-days: 1
