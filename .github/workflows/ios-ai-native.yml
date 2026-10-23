@@ -1,0 +1,41 @@
+name: iOS AI native port check
+on:
+  push:
+    branches: [ios-cloud-check-*]
+    paths:
+      - '.github/workflows/ios-ai-native.yml'
+      - 'native/ai-server/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify AI source manifest
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('native/ai-server')
+          manifest=json.loads((root/'source-manifest.json').read_text())
+          for name, expected in manifest['files'].items():
+              actual=hashlib.sha256((root/name).read_bytes()).hexdigest()
+              if actual!=expected: raise SystemExit('Source mismatch: '+name)
+          print('Verified',len(manifest['files']),'source files')
+          PY
+      - name: Compile first AI server translation unit for iPhoneOS
+        run: |
+          set -euo pipefail
+          src=native/ai-server
+          xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -std=c++17 -O2 -DYGOPRO_SERVER_MODE -DSERVER_ZIP_SUPPORT \
+            -DSERVER_PRO2_SUPPORT -DSERVER_PRO3_SUPPORT \
+            -DSERVER_TAG_SURRENDER_CONFIRM \
+            -I "$src/ygoserver" -I "$src/ygoserver/spmemvfs" \
+            -I native/ocgcore -I "$src/event/include" \
+            -I "$src/sqlite3" -I "$src/irrlicht/source/Irrlicht" \
+            -I "$src/irrlicht/include" \
+            -c "$src/ygoserver/serverapi.cpp" -o serverapi.o
