@@ -18,7 +18,7 @@ concurrency:
 jobs:
   inspect:
     runs-on: macos-15
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Inspect host and Apple SDK
         shell: bash
@@ -62,6 +62,18 @@ jobs:
           for symbol in Set Get Free Delete; do
             grep -Eq "[[:space:]]_KoishiMyCardKeychain${symbol}$" keychain-symbols.txt
           done
+      - name: Compile and link OCG and deterministic Lua for iPhoneOS
+        run: bash native/build_core.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-native-core
+          path: |
+            native/out/libocgcore-ios.a
+            native/out/core-symbols.txt
+            native/out/SHA256SUMS
+            native/source-manifest.json
+          if-no-files-found: error
+          retention-days: 7
       - name: State validation scope
         if: always()
         shell: bash
