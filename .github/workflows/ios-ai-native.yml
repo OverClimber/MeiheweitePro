@@ -25,10 +25,11 @@ jobs:
               if actual!=expected: raise SystemExit('Source mismatch: '+name)
           print('Verified',len(manifest['files']),'source files')
           PY
-      - name: Compile first AI server translation unit for iPhoneOS
+      - name: Compile all AI server translation units for iPhoneOS
         run: |
           set -euo pipefail
           src=native/ai-server
+          for unit in data_manager deck_manager game gframe netserver replay serverapi single_duel tag_duel; do
           xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 \
             -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
             -std=c++17 -O2 -DYGOPRO_SERVER_MODE -DSERVER_ZIP_SUPPORT \
@@ -38,4 +39,5 @@ jobs:
             -I "$src/ocgcore" -I "$src/event/include" -I "$src/event/android" \
             -I "$src/sqlite3" -I "$src/irrlicht/source/Irrlicht" \
             -I "$src/irrlicht/include" \
-            -c "$src/ygoserver/serverapi.cpp" -o serverapi.o
+            -c "$src/ygoserver/$unit.cpp" -o "$unit.o"
+          done
