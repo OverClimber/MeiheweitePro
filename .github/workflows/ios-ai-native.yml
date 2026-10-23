@@ -54,7 +54,8 @@ jobs:
           src=Path('native/ai-server/event/android/event2/event-config.h').read_text()
           for key in ('_EVENT_HAVE_EPOLL','_EVENT_HAVE_EPOLL_CTL','_EVENT_HAVE_EVENTFD',
                       '_EVENT_HAVE_SYS_EPOLL_H','_EVENT_HAVE_SYS_EVENTFD_H',
-                      '_EVENT_HAVE_SENDFILE','_EVENT_HAVE_SYS_SENDFILE_H'):
+                      '_EVENT_HAVE_SENDFILE','_EVENT_HAVE_SYS_SENDFILE_H',
+                      '_EVENT_HAVE_NETINET_IN6_H'):
               src=src.replace('#define '+key+' 1', '/* #undef '+key+' */')
           Path('ai-config/event2/event-config.h').write_text(src)
           PY
