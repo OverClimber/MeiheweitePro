@@ -12,9 +12,11 @@ with zipfile.ZipFile(src) as z:
     z.extractall(dest)
 if not (dest/'Unity-iPhone.xcodeproj').is_dir(): raise SystemExit('Xcode project missing')
 PY
+python3 native/disable_legacy_ai_export.py xcode-export
+xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 -c native/legacy_ai_unavailable.cpp -o native/legacy_ai_unavailable.o
 mkdir -p xcode-export/Libraries
 xcrun libtool -static -o xcode-export/Libraries/libiPhone-lib-combined.a \
-  xcode-export/Libraries/libiPhone-lib.a native/out/libocgcore-ios.a
+  xcode-export/Libraries/libiPhone-lib.a native/out/libocgcore-ios.a native/legacy_ai_unavailable.o
 mv xcode-export/Libraries/libiPhone-lib-combined.a xcode-export/Libraries/libiPhone-lib.a
 xcodebuild -project xcode-export/Unity-iPhone.xcodeproj -scheme Unity-iPhone \
   -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
