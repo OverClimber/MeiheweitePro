@@ -69,3 +69,23 @@ jobs:
             "${cc[@]}" -I ai-config -I "$src/event" -I "$src/event/include" -I "$src/event/compat" \
               -c "$src/event/$unit.c" -o "ai-objects/event-$unit.o"
           done
+      - name: Compile AI archive reader for iPhoneOS
+        run: |
+          set -euo pipefail
+          src=native/ai-server/irrlicht
+          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+          common=(-target arm64-apple-ios13.0 -isysroot "$sdk" -O2 \
+            -D_IRR_STATIC_LIB_ -DNO_IRR_COMPILE_WITH_ZIP_ENCRYPTION_ \
+            -DNO_IRR_COMPILE_WITH_BZIP2_ \
+            -DNO__IRR_COMPILE_WITH_MOUNT_ARCHIVE_LOADER_ \
+            -DNO__IRR_COMPILE_WITH_PAK_ARCHIVE_LOADER_ \
+            -DNO__IRR_COMPILE_WITH_NPK_ARCHIVE_LOADER_ \
+            -DNO__IRR_COMPILE_WITH_TAR_ARCHIVE_LOADER_ \
+            -DNO__IRR_COMPILE_WITH_WAD_ARCHIVE_LOADER_ \
+            -I "$src/include" -I "$src/source/Irrlicht" -I "$src/source/Irrlicht/zlib")
+          for unit in adler32 crc32 inffast inflate inftrees zutil; do
+            xcrun --sdk iphoneos clang "${common[@]}" -c "$src/source/Irrlicht/zlib/$unit.c" -o "ai-objects/irr-z-$unit.o"
+          done
+          for unit in os CAttributes CFileList CFileSystem CLimitReadFile CMemoryFile CReadFile CWriteFile CXMLReader CXMLWriter CZipReader; do
+            xcrun --sdk iphoneos clang++ "${common[@]}" -std=c++17 -c "$src/source/Irrlicht/$unit.cpp" -o "ai-objects/irr-$unit.o"
+          done
