@@ -4,6 +4,9 @@ on:
     branches: [ios-cloud-check-*]
     paths:
       - '.github/workflows/ios-build.yml'
+      - 'native/build_exported_xcode.sh'
+      - 'native/legacy_ai_unavailable.cpp'
+      - 'native/disable_legacy_ai_export.py'
   workflow_dispatch:
 permissions:
   contents: read
