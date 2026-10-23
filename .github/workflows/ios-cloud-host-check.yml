@@ -49,6 +49,19 @@ jobs:
           xcrun nm -gU host-probe.o | tee native-symbols.txt
           grep -Eq '[[:space:]]_MeiheweiteIOSHostProbe$' native-symbols.txt
           xcrun otool -l host-probe.o > native-load-commands.txt
+      - uses: actions/checkout@v4
+      - name: Compile and link project Keychain bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 \
+            -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -dynamiclib native/MyCardKeychain.mm -framework Security -framework CoreFoundation \
+            -o keychain-check.dylib
+          xcrun nm -gU keychain-check.dylib | tee keychain-symbols.txt
+          for symbol in Set Get Free Delete; do
+            grep -Eq "[[:space:]]_KoishiMyCardKeychain${symbol}$" keychain-symbols.txt
+          done
       - name: State validation scope
         if: always()
         shell: bash
@@ -67,5 +80,6 @@ jobs:
             host-report.txt
             native-symbols.txt
             native-load-commands.txt
+            keychain-symbols.txt
           if-no-files-found: error
           retention-days: 1
