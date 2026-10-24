@@ -7,8 +7,14 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('binary', type=Path)
 parser.add_argument('--objdump', default='llvm-objdump')
+parser.add_argument('--start-address')
+parser.add_argument('--stop-address')
 args = parser.parse_args()
-result = subprocess.run([args.objdump, '-d', str(args.binary)], check=True,
+command = [args.objdump, '-d', str(args.binary)]
+for name in ('start_address', 'stop_address'):
+    if getattr(args, name):
+        command.append('--' + name.replace('_', '-') + '=' + getattr(args, name))
+result = subprocess.run(command, check=True,
                         capture_output=True, text=True)
 match = re.search(r'^[^\n]*_+ZN3ygo9NetServer8InitDuelEv>?:\n(.*?)(?=\n\n|\Z)',
                   result.stdout, re.M | re.S)
