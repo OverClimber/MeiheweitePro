@@ -7,6 +7,8 @@ on:
       - 'native/build_exported_xcode_ai.sh'
       - 'native/legacy_ai_unavailable.cpp'
       - 'native/disable_legacy_ai_export.py'
+      - 'native/build_ai.sh'
+      - 'native/patch_init_duel.py'
   workflow_dispatch:
 permissions:
   contents: read

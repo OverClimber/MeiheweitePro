@@ -9,6 +9,7 @@ for name, expected in manifest['files'].items():
     if actual!=expected: raise SystemExit('Source mismatch: '+name)
 print('Verified',len(manifest['files']),'source files')
 PY
+python3 native/patch_init_duel.py native/ai-server
 set -euo pipefail
 src=native/ai-server
 for unit in data_manager deck_manager game gframe netserver replay serverapi single_duel tag_duel; do
@@ -23,6 +24,7 @@ xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 \
   -I "$src/irrlicht/include" \
   -c "$src/ygoserver/$unit.cpp" -o "$unit.o"
 done
+python3 native/check_init_duel_binary.py netserver.o --objdump "$(xcrun --find llvm-objdump)"
 set -euo pipefail
 src=native/ai-server
 sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
