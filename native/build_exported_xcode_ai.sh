@@ -14,6 +14,7 @@ if not (dest/'Unity-iPhone.xcodeproj').is_dir(): raise SystemExit('Xcode project
 PY
 python3 native/apply_export_delta.py native/ai-urlfix.zip xcode-export
 python3 native/apply_export_delta.py native/touch-20261024.zip xcode-export
+python3 native/apply_export_delta.py native/ui-20261026.zip xcode-export
 python3 native/disable_legacy_ai_export.py xcode-export
 python3 native/seed_ai_test_decks.py xcode-export/Data/Raw/gamedata.zip
 xcrun --sdk iphoneos clang++ -target arm64-apple-ios13.0 -c native/legacy_ai_unavailable.cpp -o native/legacy_ai_unavailable.o
